@@ -9,7 +9,11 @@ pub enum Error {
     /// File is missing the VHD footer or the cookie doesn't match.
     NotVhd,
     /// Footer or dynamic-header checksum mismatch.
-    BadChecksum { expected: u32, found: u32, what: &'static str },
+    BadChecksum {
+        expected: u32,
+        found: u32,
+        what: &'static str,
+    },
     /// Disk type byte outside the known {2 fixed, 3 dynamic, 4 differencing} set.
     UnsupportedDiskType(u32),
     /// Header field combination is internally inconsistent.
@@ -18,7 +22,11 @@ pub enum Error {
     /// pointing at non-file-relative sources).
     Unsupported(&'static str),
     /// Read past the end of the virtual disk.
-    OutOfBounds { offset: u64, len: u64, size: u64 },
+    OutOfBounds {
+        offset: u64,
+        len: u64,
+        size: u64,
+    },
     /// Differencing-chain depth exceeded.
     ParentTooDeep,
     /// Differencing parent could not be located via any locator.
@@ -33,18 +41,31 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "io: {e}"),
             Error::NotVhd => write!(f, "not a VHD image (missing or invalid footer)"),
-            Error::BadChecksum { expected, found, what } => {
-                write!(f, "{what} checksum mismatch: expected {expected:#x}, found {found:#x}")
+            Error::BadChecksum {
+                expected,
+                found,
+                what,
+            } => {
+                write!(
+                    f,
+                    "{what} checksum mismatch: expected {expected:#x}, found {found:#x}"
+                )
             }
             Error::UnsupportedDiskType(t) => write!(f, "unsupported VHD disk type: {t}"),
             Error::Corrupt(s) => write!(f, "corrupt VHD: {s}"),
             Error::Unsupported(s) => write!(f, "unsupported VHD feature: {s}"),
             Error::OutOfBounds { offset, len, size } => {
-                write!(f, "read [{offset}, {offset}+{len}) past virtual size {size}")
+                write!(
+                    f,
+                    "read [{offset}, {offset}+{len}) past virtual size {size}"
+                )
             }
             Error::ParentTooDeep => write!(f, "differencing chain too deep (cycle?)"),
             Error::ParentNotFound(s) => write!(f, "differencing parent not found: {s}"),
-            Error::ReadOnly => write!(f, "VHD is read-only (opened RO, or write path not yet implemented for this subtype)"),
+            Error::ReadOnly => write!(
+                f,
+                "VHD is read-only (opened RO, or write path not yet implemented for this subtype)"
+            ),
         }
     }
 }

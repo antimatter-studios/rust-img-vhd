@@ -157,8 +157,14 @@ fn read_u32(b: &[u8], off: usize) -> u32 {
 
 fn read_u64(b: &[u8], off: usize) -> u64 {
     u64::from_be_bytes([
-        b[off], b[off + 1], b[off + 2], b[off + 3],
-        b[off + 4], b[off + 5], b[off + 6], b[off + 7],
+        b[off],
+        b[off + 1],
+        b[off + 2],
+        b[off + 3],
+        b[off + 4],
+        b[off + 5],
+        b[off + 6],
+        b[off + 7],
     ])
 }
 
