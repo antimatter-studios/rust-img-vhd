@@ -16,13 +16,26 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust-img-vhd
     steps:
-      - uses: actions/checkout@v4
+      - name: checkout am-img-vhd
+        uses: actions/checkout@v4
+        with:
+          path: rust-img-vhd
+      - name: checkout am-fs-core (sibling path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-img-vhd
       - name: build
         run: cargo build --all-targets
       - name: test
