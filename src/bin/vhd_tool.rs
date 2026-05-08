@@ -47,10 +47,7 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
         r.virtual_size() as f64 / (1024.0 * 1024.0)
     );
     println!("block_size       : {} bytes", r.block_size());
-    println!(
-        "file_format_ver  : {:#x}",
-        f.file_format_version
-    );
+    println!("file_format_ver  : {:#x}", f.file_format_version);
     println!("has_parent       : {}", r.has_parent());
     Ok(())
 }
@@ -85,7 +82,8 @@ fn parse_u64(s: &str) -> Result<u64, String> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).map_err(|e| format!("invalid hex {s:?}: {e}"))
     } else {
-        s.parse::<u64>().map_err(|e| format!("invalid decimal {s:?}: {e}"))
+        s.parse::<u64>()
+            .map_err(|e| format!("invalid decimal {s:?}: {e}"))
     }
 }
 
@@ -106,7 +104,14 @@ fn hex_dump(start: u64, bytes: &[u8]) {
         print!(" |");
         for b in line {
             let c = *b;
-            print!("{}", if (0x20..0x7f).contains(&c) { c as char } else { '.' });
+            print!(
+                "{}",
+                if (0x20..0x7f).contains(&c) {
+                    c as char
+                } else {
+                    '.'
+                }
+            );
         }
         println!("|");
     }

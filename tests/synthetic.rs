@@ -12,8 +12,10 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use vhd::dynamic::{
+    compute_checksum as dyn_cs, BAT_UNALLOCATED, DYN_HEADER_COOKIE, DYN_HEADER_SIZE,
+};
 use vhd::footer::{compute_checksum as footer_cs, FOOTER_COOKIE, FOOTER_SIZE};
-use vhd::dynamic::{compute_checksum as dyn_cs, DYN_HEADER_COOKIE, DYN_HEADER_SIZE, BAT_UNALLOCATED};
 use vhd::{DiskType, VhdReader};
 
 fn tmp_path(name: &str) -> PathBuf {
@@ -191,7 +193,10 @@ fn dynamic_allocated_block_reads_back_data() {
         panic!(
             "buf and block differ: first diff at idx {first_diff}, \
              got 0x{:02X}, expected 0x{:02X}; buf.len()={}, block.len()={}",
-            buf[first_diff], block[first_diff], buf.len(), block.len()
+            buf[first_diff],
+            block[first_diff],
+            buf.len(),
+            block.len()
         );
     }
 

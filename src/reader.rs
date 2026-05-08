@@ -113,19 +113,13 @@ impl VhdReader {
                 file.read_exact(&mut bat_bytes)?;
                 let mut bat = Vec::with_capacity(bat_entries);
                 for chunk in bat_bytes.chunks_exact(4) {
-                    bat.push(u32::from_be_bytes([
-                        chunk[0], chunk[1], chunk[2], chunk[3],
-                    ]));
+                    bat.push(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
                 }
 
                 let bitmap_size = dyn_hdr.bitmap_size_bytes();
 
                 let parent = if footer.disk_type == DiskType::Differencing {
-                    Some(Box::new(open_parent(
-                        path,
-                        &dyn_hdr,
-                        depth_remaining,
-                    )?))
+                    Some(Box::new(open_parent(path, &dyn_hdr, depth_remaining)?))
                 } else {
                     None
                 };
@@ -229,9 +223,7 @@ impl VhdReader {
 
         match self.footer.disk_type {
             DiskType::Fixed => self.read_fixed(offset, buf),
-            DiskType::Dynamic | DiskType::Differencing => {
-                self.read_sparse(offset, buf)
-            }
+            DiskType::Dynamic | DiskType::Differencing => self.read_sparse(offset, buf),
         }
     }
 
@@ -245,8 +237,7 @@ impl VhdReader {
     /// True only when the underlying file was opened RW *and* the
     /// subtype has a write path. Today: fixed only.
     pub fn writable(&self) -> bool {
-        matches!(self.mode, Mode::ReadWrite)
-            && matches!(self.footer.disk_type, DiskType::Fixed)
+        matches!(self.mode, Mode::ReadWrite) && matches!(self.footer.disk_type, DiskType::Fixed)
     }
 
     /// Write exactly `buf.len()` bytes starting at virtual `offset`.
@@ -320,8 +311,7 @@ impl VhdReader {
             let in_block = cursor & block_mask;
             let block_idx = (cursor / block_size) as usize;
             let bytes_remaining_in_block = block_size - in_block;
-            let chunk_len =
-                std::cmp::min(bytes_remaining_in_block, end - cursor) as usize;
+            let chunk_len = std::cmp::min(bytes_remaining_in_block, end - cursor) as usize;
 
             if block_idx >= bat.len() {
                 return Err(Error::Corrupt("block_idx past BAT"));
@@ -354,8 +344,7 @@ impl VhdReader {
                 let in_sector = block_cursor & (SECTOR_SIZE - 1);
                 let bytes_left_in_sector = SECTOR_SIZE - in_sector;
                 let slice_len =
-                    std::cmp::min(bytes_left_in_sector, block_end - block_cursor)
-                        as usize;
+                    std::cmp::min(bytes_left_in_sector, block_end - block_cursor) as usize;
                 let bit_byte = (sector_in_block / 8) as usize;
                 let bit_in_byte = 7 - (sector_in_block % 8) as u8;
                 let bit_set = (bitmap[bit_byte] >> bit_in_byte) & 1 == 1;
@@ -364,10 +353,8 @@ impl VhdReader {
                 if bit_set {
                     // Sector lives at: bat_entry * 512 + bitmap_size +
                     // sector_in_block * 512 + in_sector
-                    let host_off = block_host_off
-                        + bitmap_size
-                        + sector_in_block * SECTOR_SIZE
-                        + in_sector;
+                    let host_off =
+                        block_host_off + bitmap_size + sector_in_block * SECTOR_SIZE + in_sector;
                     let mut f = self.file.lock().unwrap();
                     f.seek(SeekFrom::Start(host_off))?;
                     f.read_exact(dst)?;
