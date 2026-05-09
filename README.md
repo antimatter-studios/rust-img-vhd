@@ -11,10 +11,21 @@ C/C++/Go/Swift.
 - [x] Dynamic VHD (footer + dynamic header + BAT + sparse blocks)
 - [x] Differencing VHD (parent VHD chain, fall-through reads)
 - [x] `BlockRead` + `BlockDevice` impl via `am-fs-core`
-- [x] C ABI: `vhd_open(path) -> *mut FsCoreDevice`
-- [x] Write support — fixed VHDs (`open_rw`, `create_fixed`, pass-through `write_at`)
-  - [ ] Dynamic write path (BAT mutation + crash-safety ordering — pending)
-  - [ ] Differencing write path — pending
+- [x] Reader is generic over `Arc<dyn BlockDevice>`; path-based `open` /
+  `open_rw` / `create_fixed` wrap a `FileDevice` internally, and the
+  `open_on_device` / `open_rw_on_device` constructors stack the VHD layer
+  on top of any caller-supplied device (e.g. an FSKit block resource).
+- [x] C ABI: `vhd_open` / `vhd_open_rw` / `vhd_create_fixed` /
+  `vhd_open_on_device` / `vhd_open_rw_on_device` — all returning
+  `*mut FsCoreDevice`.
+- [x] Write support — fixed VHDs (`open_rw`, `create_fixed`, pass-through
+  `write_at`)
+- [x] Dynamic write path (BAT mutation, tail-allocated blocks, footer
+  mirror rewrite). Crash-safety order on allocation:
+  data → bitmap → BAT entry → footer mirror, with `dev.flush()` between
+  each step.
+  - [ ] Differencing write path — still TODO. `write_at` on a
+    differencing reader returns `Error::ReadOnly`.
 
 ## Layout
 

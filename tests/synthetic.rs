@@ -463,19 +463,30 @@ fn fixed_opened_read_write_is_writable() {
 }
 
 #[test]
-fn dynamic_is_not_writable() {
-    let path = tmp_path("dynamic_not_writable");
+fn dynamic_opened_read_only_rejects_writes() {
+    let path = tmp_path("dynamic_ro_writes_rejected");
     let block: Vec<u8> = vec![0u8; 4096];
     build_dynamic_vhd(&path, &block, 0xFF);
 
-    // Even when opened RW, dynamic returns false (no write path yet).
-    let r = VhdReader::open_rw(&path).unwrap();
+    let r = VhdReader::open(&path).unwrap();
     assert_eq!(r.disk_type(), DiskType::Dynamic);
     assert!(!r.writable());
-    assert!(!<VhdReader as fs_core::BlockDevice>::is_writable(&r));
     let buf = [0u8; 16];
     let err = r.write_at(0, &buf).unwrap_err();
     assert!(matches!(err, vhd::Error::ReadOnly), "got {err:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn dynamic_opened_rw_is_writable() {
+    let path = tmp_path("dynamic_rw_writable");
+    let block: Vec<u8> = vec![0u8; 4096];
+    build_dynamic_vhd(&path, &block, 0xFF);
+
+    let r = VhdReader::open_rw(&path).unwrap();
+    assert_eq!(r.disk_type(), DiskType::Dynamic);
+    assert!(r.writable());
+    assert!(<VhdReader as fs_core::BlockDevice>::is_writable(&r));
     let _ = std::fs::remove_file(&path);
 }
 
@@ -534,6 +545,264 @@ fn create_fixed_rejects_unaligned_size() {
 // ---------------------------------------------------------------------------
 // fs_core::BlockRead bridge sanity
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// On-device entry points (FileDevice round-trip + parent-on-device rejection)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn open_on_device_round_trips_fixed_image() {
+    use fs_core::FileDevice;
+    use std::sync::Arc;
+    let path = tmp_path("on_device_fixed");
+    let virt_size = 8u64 * 1024;
+    let pattern: Vec<u8> = (0u8..=255u8).cycle().take(virt_size as usize).collect();
+    let mut f = File::create(&path).unwrap();
+    f.write_all(&pattern).unwrap();
+    let footer = build_footer(DiskType::Fixed, u64::MAX, virt_size);
+    f.write_all(&footer).unwrap();
+    drop(f);
+
+    let dev = Arc::new(FileDevice::open(&path).unwrap()) as Arc<dyn fs_core::BlockDevice>;
+    let r = VhdReader::open_on_device(dev).unwrap();
+    assert_eq!(r.disk_type(), DiskType::Fixed);
+    assert_eq!(r.virtual_size(), virt_size);
+
+    let mut buf = vec![0u8; 256];
+    r.read_at(64, &mut buf).unwrap();
+    assert_eq!(buf, pattern[64..64 + 256]);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn open_rw_on_device_supports_fixed_writes() {
+    use fs_core::FileDevice;
+    use std::sync::Arc;
+    let path = tmp_path("on_device_rw_fixed");
+    let virt_size = 4u64 * 1024;
+    {
+        let _r = VhdReader::create_fixed(&path, virt_size).unwrap();
+    }
+
+    let dev = Arc::new(FileDevice::open_rw(&path).unwrap()) as Arc<dyn fs_core::BlockDevice>;
+    let r = VhdReader::open_rw_on_device(dev).unwrap();
+    assert!(r.writable());
+
+    let payload = vec![0xCDu8; 256];
+    r.write_at(512, &payload).unwrap();
+    r.flush_writes().unwrap();
+    let mut buf = vec![0u8; 256];
+    r.read_at(512, &mut buf).unwrap();
+    assert_eq!(buf, payload);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn open_rw_on_device_rejects_readonly_inner() {
+    use fs_core::FileDevice;
+    use std::sync::Arc;
+    let path = tmp_path("on_device_ro_inner");
+    let virt_size = 4u64 * 1024;
+    {
+        let _r = VhdReader::create_fixed(&path, virt_size).unwrap();
+    }
+    let dev = Arc::new(FileDevice::open(&path).unwrap()) as Arc<dyn fs_core::BlockDevice>;
+    match VhdReader::open_rw_on_device(dev) {
+        Err(vhd::Error::ReadOnly) => {}
+        Err(e) => panic!("expected ReadOnly, got error {e:?}"),
+        Ok(_) => panic!("expected ReadOnly, got Ok"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn differencing_on_device_rejected() {
+    use fs_core::FileDevice;
+    use std::sync::Arc;
+    let parent_path = tmp_path("diff_on_dev_parent");
+    let virt_size = 8u64 * 1024;
+    let parent_data: Vec<u8> = vec![0xAB; virt_size as usize];
+    let mut p = File::create(&parent_path).unwrap();
+    p.write_all(&parent_data).unwrap();
+    let parent_footer = build_footer(DiskType::Fixed, u64::MAX, virt_size);
+    p.write_all(&parent_footer).unwrap();
+    drop(p);
+
+    let child_path = tmp_path("diff_on_dev_child");
+    build_differencing_vhd(&child_path, &parent_path, 0xFF, 0x11);
+
+    let dev = Arc::new(FileDevice::open(&child_path).unwrap()) as Arc<dyn fs_core::BlockDevice>;
+    match VhdReader::open_on_device(dev) {
+        Err(vhd::Error::Unsupported(_)) => {}
+        Err(e) => panic!("expected Unsupported, got error {e:?}"),
+        Ok(_) => panic!("expected Unsupported, got Ok"),
+    }
+    let _ = std::fs::remove_file(&child_path);
+    let _ = std::fs::remove_file(&parent_path);
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic write path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dynamic_write_into_existing_block_round_trips() {
+    let path = tmp_path("dynamic_write_existing");
+    // Block 0 starts with pattern; bitmap fully set so the pre-write
+    // read sees the original bytes.
+    let original: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+    build_dynamic_vhd(&path, &original, 0xFF);
+
+    let r = VhdReader::open_rw(&path).unwrap();
+    assert!(r.writable());
+
+    // Overwrite 256 bytes inside block 0.
+    let payload = vec![0x5Au8; 256];
+    r.write_at(100, &payload).unwrap();
+    r.flush_writes().unwrap();
+
+    // Read it back through the same handle.
+    let mut buf = vec![0u8; 256];
+    r.read_at(100, &mut buf).unwrap();
+    assert_eq!(buf, payload);
+
+    // Bytes outside the written window are untouched.
+    let mut head = vec![0u8; 100];
+    r.read_at(0, &mut head).unwrap();
+    assert_eq!(head, original[..100]);
+
+    // Re-open RO; the on-disk image must reflect the write.
+    drop(r);
+    let r2 = VhdReader::open(&path).unwrap();
+    let mut buf2 = vec![0u8; 256];
+    r2.read_at(100, &mut buf2).unwrap();
+    assert_eq!(buf2, payload);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn dynamic_write_allocates_fresh_block() {
+    // Block 0 allocated, block 1 sparse. Write into block 1 to force
+    // a fresh allocation, then verify both the new content and that
+    // the trailing footer mirror still parses on re-open.
+    let path = tmp_path("dynamic_write_alloc");
+    let block0: Vec<u8> = vec![0u8; 4096];
+    build_dynamic_vhd(&path, &block0, 0xFF);
+
+    let r = VhdReader::open_rw(&path).unwrap();
+    assert!(r.writable());
+
+    // Block 1 is virt offset [4096, 8192).
+    let payload = vec![0xE3u8; 1024];
+    r.write_at(4096 + 200, &payload).unwrap();
+    r.flush_writes().unwrap();
+
+    // Read back through the same handle.
+    let mut buf = vec![0u8; 1024];
+    r.read_at(4096 + 200, &mut buf).unwrap();
+    assert_eq!(buf, payload);
+
+    // Untouched parts of block 1 still read as zeros.
+    let mut head = vec![0xFFu8; 200];
+    r.read_at(4096, &mut head).unwrap();
+    assert!(head.iter().all(|&b| b == 0), "block 1 head should be zero");
+
+    // Trailing parts of block 1 also zero.
+    let mut tail = vec![0xFFu8; 4096 - 200 - 1024];
+    r.read_at(4096 + 200 + 1024, &mut tail).unwrap();
+    assert!(tail.iter().all(|&b| b == 0), "block 1 tail should be zero");
+
+    // Re-open RO — exercises footer-mirror rewrite + BAT durability.
+    drop(r);
+    let r2 = VhdReader::open(&path).unwrap();
+    let mut buf2 = vec![0u8; 1024];
+    r2.read_at(4096 + 200, &mut buf2).unwrap();
+    assert_eq!(buf2, payload);
+    assert_eq!(r2.virtual_size(), 8 * 1024);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn dynamic_write_spanning_block_boundary_allocates_both() {
+    // Both blocks start sparse. A single write that straddles the
+    // boundary must allocate two fresh blocks and splice the payload
+    // correctly across them.
+    //
+    // Build a dynamic VHD with both BAT entries unallocated.
+    let path = tmp_path("dynamic_write_span");
+    build_dynamic_vhd_all_sparse(&path);
+
+    let r = VhdReader::open_rw(&path).unwrap();
+    assert!(r.writable());
+
+    // Write 2 KiB straddling block boundary at virt offset 4096-512:
+    //   first 512 bytes land at end of block 0, next 1536 bytes at
+    //   start of block 1.
+    let payload: Vec<u8> = (0u8..=255u8).cycle().take(2048).collect();
+    let start = 4096u64 - 512;
+    r.write_at(start, &payload).unwrap();
+    r.flush_writes().unwrap();
+
+    // Same-handle read.
+    let mut buf = vec![0u8; 2048];
+    r.read_at(start, &mut buf).unwrap();
+    assert_eq!(buf, payload);
+
+    // Untouched preceding bytes of block 0 still zero.
+    let mut head = vec![0xFFu8; 512];
+    r.read_at(0, &mut head).unwrap();
+    assert!(head.iter().all(|&b| b == 0));
+
+    // Untouched trailing bytes of block 1 still zero.
+    let mut tail = vec![0xFFu8; 4096 - 1536];
+    r.read_at(start + 2048, &mut tail).unwrap();
+    assert!(tail.iter().all(|&b| b == 0));
+
+    // Reopen RO; the image must be coherent.
+    drop(r);
+    let r2 = VhdReader::open(&path).unwrap();
+    let mut buf2 = vec![0u8; 2048];
+    r2.read_at(start, &mut buf2).unwrap();
+    assert_eq!(buf2, payload);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Like `build_dynamic_vhd` but with both BAT entries marked unallocated.
+/// Used for tests that exercise the allocation path on first write.
+fn build_dynamic_vhd_all_sparse(path: &PathBuf) {
+    const SECTOR: u64 = 512;
+    const FOOTER_OFF: u64 = 0;
+    const DYN_HEADER_OFF: u64 = SECTOR;
+    const BAT_OFF: u64 = SECTOR * 3;
+    // No allocated blocks: end-of-data == BAT_OFF + bat sector.
+    const END_OF_DATA: u64 = SECTOR * 5;
+    const BLOCK_SIZE: u32 = 4096;
+    const VIRT_SIZE: u64 = 8 * 1024;
+
+    let footer = build_footer(DiskType::Dynamic, DYN_HEADER_OFF, VIRT_SIZE);
+
+    let mut hdr = [0u8; DYN_HEADER_SIZE];
+    hdr[0..8].copy_from_slice(DYN_HEADER_COOKIE);
+    hdr[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
+    hdr[16..24].copy_from_slice(&BAT_OFF.to_be_bytes());
+    hdr[24..28].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    hdr[28..32].copy_from_slice(&2u32.to_be_bytes());
+    hdr[32..36].copy_from_slice(&BLOCK_SIZE.to_be_bytes());
+    let cs = dyn_cs(&hdr);
+    hdr[36..40].copy_from_slice(&cs.to_be_bytes());
+
+    let mut bat = [0u8; 512];
+    bat[0..4].copy_from_slice(&BAT_UNALLOCATED.to_be_bytes());
+    bat[4..8].copy_from_slice(&BAT_UNALLOCATED.to_be_bytes());
+
+    let total_with_footer = END_OF_DATA + FOOTER_SIZE as u64;
+    let mut f = File::create(path).unwrap();
+    f.set_len(total_with_footer).unwrap();
+    f.write_all_at(&footer, FOOTER_OFF).unwrap();
+    f.write_all_at(&hdr, DYN_HEADER_OFF).unwrap();
+    f.write_all_at(&bat, BAT_OFF).unwrap();
+    f.write_all_at(&footer, END_OF_DATA).unwrap();
+}
 
 #[test]
 fn fs_core_blockread_size_matches_virtual() {

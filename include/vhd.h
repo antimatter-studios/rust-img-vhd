@@ -31,9 +31,9 @@ extern "C" {
 FsCoreDevice *vhd_open(const char *path);
 
 /*
- * Open `path` read-write as a VHD image. Only fixed VHDs accept writes
- * today: `fs_core_device_write_at` on a dynamic or differencing handle
- * returns FS_CORE_READ_ONLY until those paths land.
+ * Open `path` read-write as a VHD image. Fixed and dynamic VHDs accept
+ * writes; `fs_core_device_write_at` on a differencing handle returns
+ * FS_CORE_READ_ONLY until that path lands.
  *
  * On failure returns NULL.
  */
@@ -47,6 +47,26 @@ FsCoreDevice *vhd_open_rw(const char *path);
  * On failure returns NULL.
  */
 FsCoreDevice *vhd_create_fixed(const char *path, uint64_t virtual_size_bytes);
+
+/*
+ * Stack a VHD reader on top of an existing FsCoreDevice handle (for
+ * example, a callback-backed device wrapping an FSKit
+ * FSBlockDeviceResource, or a slice reader). On success the returned
+ * handle owns the input device; the caller must NOT call
+ * fs_core_device_close on `inner` afterwards. On failure the input is
+ * freed automatically and the function returns NULL.
+ *
+ * Differencing images are rejected here because parent resolution
+ * needs a real path.
+ */
+FsCoreDevice *vhd_open_on_device(FsCoreDevice *inner);
+
+/*
+ * Read-write variant of vhd_open_on_device. The input device must
+ * report writable; otherwise the open fails with FS_CORE_READ_ONLY
+ * and the input is freed.
+ */
+FsCoreDevice *vhd_open_rw_on_device(FsCoreDevice *inner);
 
 #ifdef __cplusplus
 } /* extern "C" */
