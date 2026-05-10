@@ -32,8 +32,11 @@ pub enum Error {
     /// Differencing parent could not be located via any locator.
     ParentNotFound(String),
     /// Write attempted on a reader opened read-only, or on a subtype that
-    /// hasn't grown a write path yet (dynamic / differencing).
+    /// hasn't grown a write path yet (differencing).
     ReadOnly,
+    /// Backing-device error not otherwise classified (e.g. a custom
+    /// `fs_core::Error::Custom` from a callback-backed device).
+    Custom(String),
 }
 
 impl fmt::Display for Error {
@@ -66,6 +69,7 @@ impl fmt::Display for Error {
                 f,
                 "VHD is read-only (opened RO, or write path not yet implemented for this subtype)"
             ),
+            Error::Custom(s) => write!(f, "{s}"),
         }
     }
 }
