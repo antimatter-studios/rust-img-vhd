@@ -97,12 +97,7 @@ impl VhdReader {
     pub fn open_rw<P: AsRef<Path>>(path: P) -> Result<Self> {
         let p = path.as_ref();
         let dev = FileDevice::open_rw(p).map_err(fs_core_to_vhd_error)?;
-        Self::open_inner(
-            Arc::new(dev),
-            true,
-            MAX_PARENT_DEPTH,
-            Some(p.to_path_buf()),
-        )
+        Self::open_inner(Arc::new(dev), true, MAX_PARENT_DEPTH, Some(p.to_path_buf()))
     }
 
     /// Open read-only on top of an arbitrary [`BlockDevice`]. The
@@ -175,7 +170,11 @@ impl VhdReader {
                     let child_path = owning_path.as_deref().ok_or(Error::Unsupported(
                         "differencing VHD opened on a raw device; parent resolution needs a path",
                     ))?;
-                    Some(Box::new(open_parent(child_path, &dyn_hdr, depth_remaining)?))
+                    Some(Box::new(open_parent(
+                        child_path,
+                        &dyn_hdr,
+                        depth_remaining,
+                    )?))
                 } else {
                     None
                 };
@@ -186,7 +185,13 @@ impl VhdReader {
                 // data + footer" — the canonical layout.
                 let next_alloc = dev_size.saturating_sub(FOOTER_SIZE as u64);
 
-                (Some(dyn_hdr), Some(bat), bitmap_size, parent, Some(next_alloc))
+                (
+                    Some(dyn_hdr),
+                    Some(bat),
+                    bitmap_size,
+                    parent,
+                    Some(next_alloc),
+                )
             }
         };
 
@@ -299,11 +304,7 @@ impl VhdReader {
     /// True only when the underlying device was opened RW *and* the
     /// subtype has a write path. Today: fixed and dynamic.
     pub fn writable(&self) -> bool {
-        self.writable
-            && matches!(
-                self.footer.disk_type,
-                DiskType::Fixed | DiskType::Dynamic
-            )
+        self.writable && matches!(self.footer.disk_type, DiskType::Fixed | DiskType::Dynamic)
     }
 
     /// Write exactly `buf.len()` bytes starting at virtual `offset`.
@@ -682,12 +683,7 @@ fn open_parent(
 
     if candidate.exists() {
         let dev = FileDevice::open(&candidate).map_err(fs_core_to_vhd_error)?;
-        return VhdReader::open_inner(
-            Arc::new(dev),
-            false,
-            depth_remaining - 1,
-            Some(candidate),
-        );
+        return VhdReader::open_inner(Arc::new(dev), false, depth_remaining - 1, Some(candidate));
     }
 
     // Plain `parent_name` as last resort.
