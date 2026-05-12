@@ -17,7 +17,7 @@ path = "src/bin/vhd_tool.rs"
 
 [dependencies]
 # Block-device trait surface — `Qcow2Reader`-style integration.
-am-fs-core = { path = "../rust-fs-core", version = "0.1" }
+am-fs-core = { path = "../rust-fs-core", version = "0.2" }
 
 [dev-dependencies]
 
