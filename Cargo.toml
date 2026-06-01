@@ -15,11 +15,22 @@ crate-type = ["staticlib", "rlib"]
 name = "vhd_tool"
 path = "src/bin/vhd_tool.rs"
 
+[features]
+# Enables the qemu-img cross-validation test binary. Off by default so
+# `cargo test` does not require qemu-img on PATH. CI installs qemu-utils
+# and runs `cargo test --features qemu-validation --test qemu_validation`
+# in a dedicated job. qemu-img is invoked as a subprocess only — never
+# linked, never bundled into our release artifacts.
+qemu-validation = []
+
 [dependencies]
 # Block-device trait surface — `Qcow2Reader`-style integration.
 am-fs-core = { path = "../rust-fs-core", version = "0.2" }
 
 [dev-dependencies]
+# JSON parsing for `qemu-img info --output=json` in the qemu-validation
+# test harness. Test-only.
+serde_json = "1"
 
 [profile.release]
 lto = true

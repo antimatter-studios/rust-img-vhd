@@ -159,4 +159,68 @@ mod tests {
         assert_eq!(parsed.disk_type, DiskType::Fixed);
         assert_eq!(parsed.current_size, 8 * 1024 * 1024);
     }
+
+    /// Build a valid footer for the given disk type with a correct
+    /// checksum and a recognisable unique_id.
+    fn valid_footer(disk_type: u32, data_offset: u64) -> [u8; 512] {
+        let mut f = [0u8; 512];
+        f[0..8].copy_from_slice(FOOTER_COOKIE);
+        f[8..12].copy_from_slice(&0x0000_0002u32.to_be_bytes());
+        f[12..16].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        f[16..24].copy_from_slice(&data_offset.to_be_bytes());
+        f[40..48].copy_from_slice(&(8u64 * 1024 * 1024).to_be_bytes());
+        f[48..56].copy_from_slice(&(8u64 * 1024 * 1024).to_be_bytes());
+        f[60..64].copy_from_slice(&disk_type.to_be_bytes());
+        f[68..84].copy_from_slice(&[0xAB; 16]);
+        let cs = compute_checksum(&f);
+        f[64..68].copy_from_slice(&cs.to_be_bytes());
+        f
+    }
+
+    #[test]
+    fn disk_type_from_u32_accepts_known_and_rejects_unknown() {
+        assert_eq!(DiskType::from_u32(2).unwrap(), DiskType::Fixed);
+        assert_eq!(DiskType::from_u32(3).unwrap(), DiskType::Dynamic);
+        assert_eq!(DiskType::from_u32(4).unwrap(), DiskType::Differencing);
+        for bad in [0u32, 1, 5, 99] {
+            match DiskType::from_u32(bad) {
+                Err(Error::UnsupportedDiskType(v)) => assert_eq!(v, bad),
+                other => panic!("expected UnsupportedDiskType({bad}), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_footer_shorter_than_512_bytes() {
+        let err = Footer::parse(&[0u8; 100]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_checksum_mismatch() {
+        let mut f = valid_footer(2, u64::MAX);
+        f[40] ^= 0xFF; // perturb original_size without fixing checksum
+        match Footer::parse(&f).unwrap_err() {
+            Error::BadChecksum { what, .. } => assert_eq!(what, "footer"),
+            other => panic!("expected BadChecksum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_dynamic_disk_type_and_data_offset_and_unique_id() {
+        let f = valid_footer(3, 512);
+        let parsed = Footer::parse(&f).unwrap();
+        assert_eq!(parsed.disk_type, DiskType::Dynamic);
+        assert_eq!(parsed.data_offset, 512);
+        assert_eq!(parsed.unique_id, [0xAB; 16]);
+    }
+
+    #[test]
+    fn rejects_unsupported_disk_type_in_footer() {
+        let f = valid_footer(7, u64::MAX);
+        match Footer::parse(&f).unwrap_err() {
+            Error::UnsupportedDiskType(7) => {}
+            other => panic!("expected UnsupportedDiskType(7), got {other:?}"),
+        }
+    }
 }

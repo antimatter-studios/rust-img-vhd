@@ -236,4 +236,34 @@ mod tests {
             assert!(s > 0, "{size_mib}MiB spt");
         }
     }
+
+    #[test]
+    fn chs_geometry_clamps_at_and_beyond_the_spec_ceiling() {
+        // The spec caps total addressable sectors at 65535*16*255. At and
+        // beyond that size the geometry must saturate to the maxed-out
+        // 16-head / 255-spt configuration and never overflow the u16/u8
+        // fields.
+        let ceiling_bytes = 65535u64 * 16 * 255 * 512;
+        let (c_at, h_at, s_at) = chs_for_size(ceiling_bytes);
+        assert_eq!(h_at, 16);
+        assert_eq!(s_at, 255);
+        assert!(c_at > 0);
+
+        // A pebibyte is far past the ceiling — must clamp to the same
+        // geometry rather than wrapping.
+        let (c_over, h_over, s_over) = chs_for_size(1u64 << 50);
+        assert_eq!(h_over, 16);
+        assert_eq!(s_over, 255);
+        assert_eq!(c_over, c_at, "beyond-ceiling sizes clamp identically");
+    }
+
+    #[test]
+    fn built_footer_for_large_disk_has_saturated_geometry() {
+        // build_fixed_footer must round-trip even for a disk at the CHS
+        // ceiling: the footer parses and reports the requested size.
+        let size = 65535u64 * 16 * 255 * 512;
+        let f = build_fixed_footer(size);
+        let parsed = Footer::parse(&f).expect("parse");
+        assert_eq!(parsed.current_size, size);
+    }
 }
