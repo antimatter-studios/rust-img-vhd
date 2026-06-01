@@ -213,10 +213,10 @@ mod tests {
 
     #[test]
     fn rejects_bad_cookie() {
+        // parse() validates the cookie before the checksum, so corrupting
+        // the cookie alone yields Corrupt — no checksum repair needed.
         let mut h = valid_header(0x0010_0000);
         h[0..8].copy_from_slice(b"NOTcxspr");
-        let cs = compute_checksum(&h);
-        h[36..40].copy_from_slice(&cs.to_be_bytes());
         let err = DynamicHeader::parse(&h).unwrap_err();
         assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
     }

@@ -12,18 +12,38 @@ use vhd::{Error, VhdReader};
 
 const VSIZE: u64 = 1024 * 1024; // 1 MiB fixed disk
 
-fn tmp_path(name: &str) -> PathBuf {
+fn tmp_path(name: &str) -> TempPath {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let mut p = std::env::temp_dir();
     p.push(format!("vhd_corrupt_{}_{n}_{name}.vhd", std::process::id()));
-    p
+    TempPath(p)
+}
+
+/// RAII temp-file path: removes the backing file on drop so a panicking
+/// assertion can't leak fixtures into the temp dir across CI runs.
+struct TempPath(PathBuf);
+impl std::ops::Deref for TempPath {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+impl AsRef<Path> for TempPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// Create a fixed VHD with `VSIZE` bytes of virtual capacity and return
 /// its path. The 512-byte footer lives at file offset `VSIZE`.
-fn make_fixed(name: &str) -> PathBuf {
+fn make_fixed(name: &str) -> TempPath {
     let path = tmp_path(name);
     let r = VhdReader::create_fixed(&path, VSIZE).unwrap();
     r.flush_writes().unwrap();
@@ -53,7 +73,6 @@ fn created_fixed_vhd_opens_as_baseline() {
     let mut buf = [0u8; 16];
     r.read_at(0, &mut buf).unwrap();
     assert!(buf.iter().all(|&b| b == 0));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -64,7 +83,6 @@ fn corrupt_footer_cookie_is_not_vhd() {
         .err()
         .expect("expected NotVhd, got Ok");
     assert!(matches!(err, Error::NotVhd), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -77,18 +95,15 @@ fn corrupt_footer_checksum_is_rejected() {
         Err(Error::BadChecksum { what, .. }) => assert_eq!(what, "footer"),
         other => panic!("expected footer BadChecksum, got {:?}", other.err()),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn corrupt_footer_disk_type_is_unsupported() {
     let path = make_fixed("bad_disktype");
     // disk_type is a big-endian u32 at footer offset +60. Set it to 9
-    // (outside the {2,3,4} set). Recompute is not needed because the
-    // disk-type check happens after checksum *passes* only if we keep
-    // the checksum valid — so we must repair the checksum. Simpler:
-    // write the new type and let the checksum mismatch be the rejection.
-    // To target UnsupportedDiskType specifically we instead recompute.
+    // (outside the {2,3,4} set) and repair the checksum so parsing
+    // reaches the disk-type check and rejects with UnsupportedDiskType
+    // rather than BadChecksum.
     let mut f = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -110,7 +125,6 @@ fn corrupt_footer_disk_type_is_unsupported() {
         Err(Error::UnsupportedDiskType(9)) => {}
         other => panic!("expected UnsupportedDiskType(9), got {:?}", other.err()),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -135,5 +149,4 @@ fn fixed_vhd_large_write_round_trips_across_sectors() {
     let mut before = [0u8; 16];
     r2.read_at(start - 16, &mut before).unwrap();
     assert!(before.iter().all(|&b| b == 0));
-    let _ = std::fs::remove_file(&path);
 }

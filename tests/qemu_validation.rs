@@ -49,19 +49,39 @@ fn assert_qemu(args: &[&str]) {
     );
 }
 
-fn tmp(ext: &str, name: &str) -> PathBuf {
+fn tmp(ext: &str, name: &str) -> TempPath {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let mut p = std::env::temp_dir();
     p.push(format!("vhd_qemu_{}_{n}_{name}.{ext}", std::process::id()));
-    p
+    TempPath(p)
 }
 
-fn vhd_path(name: &str) -> PathBuf {
+/// RAII temp-file path: removes the backing file on drop so a panicking
+/// assertion can't leak fixtures into the temp dir across CI runs.
+struct TempPath(PathBuf);
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl AsRef<std::path::Path> for TempPath {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn vhd_path(name: &str) -> TempPath {
     tmp("vhd", name)
 }
-fn raw_path(name: &str) -> PathBuf {
+fn raw_path(name: &str) -> TempPath {
     tmp("raw", name)
 }
 
