@@ -189,4 +189,88 @@ mod tests {
         assert_eq!(parsed.max_table_entries, 4);
         assert_eq!(parsed.bitmap_size_bytes(), 512);
     }
+
+    /// Build a valid dynamic header with the given block size and a
+    /// correct checksum.
+    fn valid_header(block_size: u32) -> [u8; 1024] {
+        let mut h = [0u8; 1024];
+        h[0..8].copy_from_slice(DYN_HEADER_COOKIE);
+        h[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
+        h[16..24].copy_from_slice(&3072u64.to_be_bytes());
+        h[24..28].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        h[28..32].copy_from_slice(&4u32.to_be_bytes());
+        h[32..36].copy_from_slice(&block_size.to_be_bytes());
+        let cs = compute_checksum(&h);
+        h[36..40].copy_from_slice(&cs.to_be_bytes());
+        h
+    }
+
+    #[test]
+    fn rejects_header_shorter_than_1024_bytes() {
+        let err = DynamicHeader::parse(&[0u8; 512]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_bad_cookie() {
+        let mut h = valid_header(0x0010_0000);
+        h[0..8].copy_from_slice(b"NOTcxspr");
+        let cs = compute_checksum(&h);
+        h[36..40].copy_from_slice(&cs.to_be_bytes());
+        let err = DynamicHeader::parse(&h).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_checksum_mismatch() {
+        let mut h = valid_header(0x0010_0000);
+        h[28] ^= 0xFF; // perturb max_table_entries without fixing checksum
+        match DynamicHeader::parse(&h).unwrap_err() {
+            Error::BadChecksum { what, .. } => assert_eq!(what, "dynamic-header"),
+            other => panic!("expected BadChecksum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_block_size_not_power_of_two() {
+        let h = valid_header(0x0010_0001); // 1 MiB + 1
+        let err = DynamicHeader::parse(&h).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_block_size_below_512() {
+        let h = valid_header(256);
+        let err = DynamicHeader::parse(&h).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn bitmap_size_rounds_up_to_a_sector() {
+        // 512-byte block -> 1 sector -> 1 bit -> 1 byte -> padded to 512.
+        assert_eq!(valid_parsed(512).bitmap_size_bytes(), 512);
+        // 2 MiB block -> 4096 sectors -> 512 bytes -> exactly 1 sector.
+        assert_eq!(valid_parsed(0x0020_0000).bitmap_size_bytes(), 512);
+        // 8 MiB block -> 16384 sectors -> 2048 bytes -> 4 sectors.
+        assert_eq!(valid_parsed(0x0080_0000).bitmap_size_bytes(), 2048);
+    }
+
+    fn valid_parsed(block_size: u32) -> DynamicHeader {
+        DynamicHeader::parse(&valid_header(block_size)).unwrap()
+    }
+
+    #[test]
+    fn decodes_parent_name_from_utf16_be() {
+        let mut h = valid_header(0x0020_0000);
+        // Write "p.vhd" as UTF-16 BE into the parent name field at 64.
+        let name: Vec<u8> = "p.vhd"
+            .encode_utf16()
+            .flat_map(|u| u.to_be_bytes())
+            .collect();
+        h[64..64 + name.len()].copy_from_slice(&name);
+        let cs = compute_checksum(&h);
+        h[36..40].copy_from_slice(&cs.to_be_bytes());
+        let parsed = DynamicHeader::parse(&h).unwrap();
+        assert_eq!(parsed.parent_name, "p.vhd");
+    }
 }
