@@ -31,7 +31,7 @@ jobs:
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.1
+          toolchain: 1.95.0
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.1
+          toolchain: 1.95.0
           components: rustfmt
       - name: fmt --check
         run: cargo fmt --check
