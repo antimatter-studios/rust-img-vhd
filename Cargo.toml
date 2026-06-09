@@ -1,6 +1,6 @@
 [package]
 name = "am-img-vhd"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MIT"
 description = "Pure-Rust VHD (Microsoft Virtual Hard Disk) reader. Fixed, dynamic, and differencing variants. Exposes a Rust API and a C ABI suitable for FFI from C/C++/Go/Swift."
