@@ -140,6 +140,55 @@ fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
+/// CHS-derived virtual size, per the VHD spec's "Disk Geometry"
+/// pseudo-code (Microsoft VHD spec, October 2006). This mirrors the
+/// `chs_for_size` routine the writer uses to encode the footer's
+/// geometry field, then folds C*H*S back into bytes.
+///
+/// The VHD footer carries TWO size notions: `current_size` (the exact
+/// requested byte count) and the legacy CHS geometry (cylinders, heads,
+/// sectors-per-track). For sizes that aren't an exact C*H*S product the
+/// geometry rounds *down* — e.g. 8192 sectors yields C=120, H=4, S=17 →
+/// 8160 sectors = 4_177_920 bytes, 16_384 bytes short of the requested
+/// 4 MiB. Both numbers are spec-correct; they simply describe the disk
+/// at different granularities.
+fn chs_derived_size(size_bytes: u64) -> u64 {
+    let mut total_sectors = size_bytes / 512;
+    if total_sectors > 65535u64 * 16 * 255 {
+        total_sectors = 65535u64 * 16 * 255;
+    }
+
+    let (cylinders_times_heads, heads, sectors_per_track): (u64, u32, u32) =
+        if total_sectors >= 65535 * 16 * 63 {
+            (total_sectors / 255, 16, 255)
+        } else {
+            let mut spt: u32 = 17;
+            let mut cth = total_sectors / spt as u64;
+            let mut heads: u32 = cth.div_ceil(1024) as u32;
+            if heads < 4 {
+                heads = 4;
+            }
+            if cth >= (heads as u64 * 1024) || heads > 16 {
+                spt = 31;
+                heads = 16;
+                cth = total_sectors / spt as u64;
+            }
+            if cth >= (heads as u64 * 1024) {
+                spt = 63;
+                heads = 16;
+                cth = total_sectors / spt as u64;
+            }
+            (cth, heads, spt)
+        };
+
+    let cylinders = if heads == 0 {
+        0
+    } else {
+        cylinders_times_heads / heads as u64
+    };
+    cylinders * heads as u64 * sectors_per_track as u64 * 512
+}
+
 #[test]
 fn qemu_img_is_callable() {
     let out = run_qemu(&["--version"]);
@@ -229,14 +278,45 @@ fn qemu_extracts_bytes_from_vhd_we_created() {
     );
 }
 
-/// Cross-write (geometry): qemu reads back the exact virtual size our
-/// writer encoded into a fixed VHD's footer.
+/// Cross-write (geometry): qemu reads back a coherent virtual size from
+/// the footer our writer encoded into a fixed VHD.
+///
+/// vpc-specific quirk: the footer stores both the requested
+/// `current_size` (4 MiB here) AND a legacy CHS geometry. For 8192
+/// sectors the spec's CHS algorithm yields C=120, H=4, S=17 → 8160
+/// sectors = 4_177_920 bytes, 16_384 short of 4 MiB. qemu's `vpc`
+/// driver derives its reported `virtual-size` from this geometry, so
+/// older qemu reports the CHS-derived 4_177_920 while newer qemu
+/// (which prefers the footer's current-size) reports the full
+/// 4_194_304. Both are spec-correct readings of the *same* footer — the
+/// difference is a qemu-version behaviour, not a bug in our writer.
+///
+/// We therefore accept either spec-legitimate value: the footer's
+/// current-size (`our_size`) or the CHS-derived size. Asserting a single
+/// hard equality against current-size would wrongly fail against the
+/// many qemu builds that report the CHS-rounded size (this is exactly
+/// what the CI runner does). The functional proof — qemu reads a
+/// coherent geometry out of the footer we produced — is preserved.
 #[test]
 fn qemu_reports_our_fixed_vhd_virtual_size() {
     let vhd = vhd_path("geom");
-    let r = VhdReader::create_fixed(&vhd, 4 * 1024 * 1024).unwrap();
+    const REQUESTED: u64 = 4 * 1024 * 1024;
+    let r = VhdReader::create_fixed(&vhd, REQUESTED).unwrap();
     let our_size = r.virtual_size();
     drop(r);
 
-    assert_eq!(our_size, qemu_vpc_virtual_size(&vhd));
+    assert_eq!(
+        our_size, REQUESTED,
+        "writer must keep the requested current-size"
+    );
+
+    let chs_size = chs_derived_size(REQUESTED);
+    assert_eq!(chs_size, 4_177_920, "VHD CHS rounding for 8192 sectors");
+
+    let qemu_size = qemu_vpc_virtual_size(&vhd);
+    assert!(
+        qemu_size == our_size || qemu_size == chs_size,
+        "qemu vpc virtual-size {qemu_size} must match either the footer's \
+         current-size {our_size} or its CHS-derived size {chs_size}",
+    );
 }
