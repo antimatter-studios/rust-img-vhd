@@ -74,6 +74,9 @@ jobs:
     environment: release
     steps:
       - uses: actions/checkout@v5
+      - name: clone am-fs-core sibling (path dep)
+        shell: bash
+        run: git clone --depth 1 --branch v0.2.2 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
