@@ -28,6 +28,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
+          ref: v0.2.2
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -61,9 +62,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
+          ref: v0.2.2
           path: rust-fs-core
       - name: install qemu-utils
-        run: sudo apt-get update && sudo apt-get install -y qemu-utils
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
