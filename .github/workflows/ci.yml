@@ -43,6 +43,36 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
+  # Cross-validates our reader/writer against `qemu-img`. qemu-img is
+  # invoked as a subprocess only — never linked, never bundled. The
+  # qemu-utils package is installed only on the CI runner.
+  qemu-validation:
+    name: qemu-validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-img-vhd
+    steps:
+      - name: checkout am-img-vhd
+        uses: actions/checkout@v4
+        with:
+          path: rust-img-vhd
+      - name: checkout am-fs-core (sibling path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          path: rust-fs-core
+      - name: install qemu-utils
+        run: sudo apt-get update && sudo apt-get install -y qemu-utils
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-img-vhd
+      - name: qemu cross-validation tests
+        run: cargo test --features qemu-validation --test qemu_validation
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
