@@ -21,7 +21,7 @@ jobs:
 
       - name: clone am-fs-core sibling
         shell: bash
-        run: git clone --depth 1 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.2 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -38,8 +38,8 @@ jobs:
             exit 1
           fi
 
-      - run: cargo test --all-targets
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: cargo clippy --locked --all-targets -- -D warnings
 
   # Gates the release on the qemu-img cross-validation actually running.
   # The default `test` job runs with qemu-validation OFF, so the qemu
@@ -54,10 +54,10 @@ jobs:
 
       - name: clone am-fs-core sibling
         shell: bash
-        run: git clone --depth 1 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.2 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - name: install qemu-utils
-        run: sudo apt-get update && sudo apt-get install -y qemu-utils
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -65,7 +65,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: qemu cross-validation tests
-        run: cargo test --features qemu-validation --test qemu_validation
+        run: cargo test --locked --features qemu-validation --test qemu_validation
 
   publish:
     name: publish to crates.io

@@ -28,6 +28,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
+          ref: v0.2.2
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -37,11 +38,11 @@ jobs:
         with:
           workspaces: rust-img-vhd
       - name: build
-        run: cargo build --all-targets
+        run: cargo build --locked --all-targets
       - name: test
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   # Cross-validates our reader/writer against `qemu-img`. qemu-img is
   # invoked as a subprocess only — never linked, never bundled. The
@@ -61,9 +62,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
+          ref: v0.2.2
           path: rust-fs-core
       - name: install qemu-utils
-        run: sudo apt-get update && sudo apt-get install -y qemu-utils
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -71,7 +73,7 @@ jobs:
         with:
           workspaces: rust-img-vhd
       - name: qemu cross-validation tests
-        run: cargo test --features qemu-validation --test qemu_validation
+        run: cargo test --locked --features qemu-validation --test qemu_validation
 
   fmt:
     name: fmt
