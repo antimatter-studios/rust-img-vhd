@@ -38,11 +38,11 @@ jobs:
         with:
           workspaces: rust-img-vhd
       - name: build
-        run: cargo build --all-targets
+        run: cargo build --locked --all-targets
       - name: test
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   # Cross-validates our reader/writer against `qemu-img`. qemu-img is
   # invoked as a subprocess only — never linked, never bundled. The
@@ -73,7 +73,7 @@ jobs:
         with:
           workspaces: rust-img-vhd
       - name: qemu cross-validation tests
-        run: cargo test --features qemu-validation --test qemu_validation
+        run: cargo test --locked --features qemu-validation --test qemu_validation
 
   fmt:
     name: fmt

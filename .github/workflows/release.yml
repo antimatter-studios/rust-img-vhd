@@ -38,8 +38,8 @@ jobs:
             exit 1
           fi
 
-      - run: cargo test --all-targets
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: cargo clippy --locked --all-targets -- -D warnings
 
   # Gates the release on the qemu-img cross-validation actually running.
   # The default `test` job runs with qemu-validation OFF, so the qemu
@@ -65,7 +65,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: qemu cross-validation tests
-        run: cargo test --features qemu-validation --test qemu_validation
+        run: cargo test --locked --features qemu-validation --test qemu_validation
 
   publish:
     name: publish to crates.io
