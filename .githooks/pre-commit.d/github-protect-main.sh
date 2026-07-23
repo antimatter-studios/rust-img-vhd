@@ -85,6 +85,24 @@ if [ -n "$desired" ] && [ "$desired" != "[]" ]; then
   # a bare replace, which is what would drop checks on a partial discovery).
   want=$(printf '%s\n%s' "$desired" "$current" \
     | jq -sc 'add | map(select(.context? != null)) | unique')
+  # Heal a stale matrix-PARENT context. When a CI job is refactored from a single
+  # job (check run "Build") into a matrix (runs "Build (cmd/api)", "Build (…)"),
+  # the bare "Build" is NEVER reported as a check run again — but the additive
+  # union above keeps requiring it, so every PR blocks forever on a check that
+  # can't complete (enforce_admins means not even an admin merge escapes). Prune a
+  # required context C when discovery shows matrix children "C (…)" but no bare
+  # "C". Only prunes a shadowed parent: a context that is itself a discovered
+  # check, or a standalone check from a workflow whose run fell outside the
+  # discovery window, is always kept.
+  want=$(printf '%s\n%s' "$want" "$desired" | jq -sc '
+    .[0] as $want | (.[1] | map(.context)) as $dctx |
+    $want | map(
+      (.context) as $c |
+      select(
+        ($dctx | index($c)) != null                       # itself a discovered check → keep
+        or (($dctx | any(startswith($c + " ("))) | not)   # no matrix child shadows it → keep
+      )
+    )')
 elif [ -n "$current" ] && [ "$current" != "[]" ]; then
   want="$current"
 else
