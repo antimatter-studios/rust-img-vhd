@@ -114,3 +114,9 @@ tasks:
       - 'cd "{{.OUT}}" && pwd -P'
     vars:
       OUT: 'dist'
+
+  lint:
+    desc: Formatting and clippy, exactly as CI runs them
+    cmds:
+      - cargo fmt --check
+      - cargo clippy --locked --all-targets -- -D warnings
