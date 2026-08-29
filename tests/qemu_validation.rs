@@ -21,12 +21,18 @@
 //!   * A *fixed* VHD has no footer copy at offset 0, so qemu's format
 //!     auto-probe scores it as `raw`; we always pass `-f vpc` so qemu
 //!     treats our images as VHD.
+//!   * Geometry is cross-checked by reading the CHS triple qemu wrote
+//!     into its own footer and asking our ladder about a disk of
+//!     exactly that geometry — never by reimplementing the ladder here.
+//!     See `qemu_geometry_is_a_fixed_point_of_our_ladder`.
 
 #![cfg(feature = "qemu-validation")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use vhd::footer::FOOTER_SIZE;
+use vhd::footer_build::chs_for_size;
 use vhd::{footer::DiskType, VhdReader};
 
 const QEMU_IMG: &str = "qemu-img";
@@ -140,53 +146,20 @@ fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
-/// CHS-derived virtual size, per the VHD spec's "Disk Geometry"
-/// pseudo-code (Microsoft VHD spec, October 2006). This mirrors the
-/// `chs_for_size` routine the writer uses to encode the footer's
-/// geometry field, then folds C*H*S back into bytes.
+/// The `(cylinders, heads, sectors_per_track)` triple out of the
+/// footer at the tail of `path`, bytes 56..60 of the last 512.
 ///
-/// The VHD footer carries TWO size notions: `current_size` (the exact
-/// requested byte count) and the legacy CHS geometry (cylinders, heads,
-/// sectors-per-track). For sizes that aren't an exact C*H*S product the
-/// geometry rounds *down* — e.g. 8192 sectors yields C=120, H=4, S=17 →
-/// 8160 sectors = 4_177_920 bytes, 16_384 bytes short of the requested
-/// 4 MiB. Both numbers are spec-correct; they simply describe the disk
-/// at different granularities.
-fn chs_derived_size(size_bytes: u64) -> u64 {
-    let mut total_sectors = size_bytes / 512;
-    if total_sectors > 65535u64 * 16 * 255 {
-        total_sectors = 65535u64 * 16 * 255;
-    }
-
-    let (cylinders_times_heads, heads, sectors_per_track): (u64, u32, u32) =
-        if total_sectors >= 65535 * 16 * 63 {
-            (total_sectors / 255, 16, 255)
-        } else {
-            let mut spt: u32 = 17;
-            let mut cth = total_sectors / spt as u64;
-            let mut heads: u32 = cth.div_ceil(1024) as u32;
-            if heads < 4 {
-                heads = 4;
-            }
-            if cth >= (heads as u64 * 1024) || heads > 16 {
-                spt = 31;
-                heads = 16;
-                cth = total_sectors / spt as u64;
-            }
-            if cth >= (heads as u64 * 1024) {
-                spt = 63;
-                heads = 16;
-                cth = total_sectors / spt as u64;
-            }
-            (cth, heads, spt)
-        };
-
-    let cylinders = if heads == 0 {
-        0
-    } else {
-        cylinders_times_heads / heads as u64
-    };
-    cylinders * heads as u64 * sectors_per_track as u64 * 512
+/// Reading the reference tool's own footer is the point: it is the one
+/// number in this suite that our code had no hand in producing.
+fn footer_geometry(path: &Path) -> (u16, u8, u8) {
+    let bytes = std::fs::read(path).expect("read image");
+    assert!(bytes.len() >= FOOTER_SIZE, "image shorter than a footer");
+    let footer = &bytes[bytes.len() - FOOTER_SIZE..];
+    (
+        u16::from_be_bytes([footer[56], footer[57]]),
+        footer[58],
+        footer[59],
+    )
 }
 
 #[test]
@@ -310,8 +283,13 @@ fn qemu_reports_our_fixed_vhd_virtual_size() {
         "writer must keep the requested current-size"
     );
 
-    let chs_size = chs_derived_size(REQUESTED);
-    assert_eq!(chs_size, 4_177_920, "VHD CHS rounding for 8192 sectors");
+    // 4 MiB is 8192 sectors; the spec's ladder answers C=120, H=4,
+    // S=17, so the geometry describes 8160 sectors. Spelled out rather
+    // than recomputed here — a number this test derives from the code
+    // under test cannot contradict it.
+    const CHS_DERIVED: u64 = 120 * 4 * 17 * 512; // 4_177_920
+    assert_eq!(CHS_DERIVED, 4_177_920);
+    let chs_size = CHS_DERIVED;
 
     let qemu_size = qemu_vpc_virtual_size(&vhd);
     assert!(
@@ -319,4 +297,64 @@ fn qemu_reports_our_fixed_vhd_virtual_size() {
         "qemu vpc virtual-size {qemu_size} must match either the footer's \
          current-size {our_size} or its CHS-derived size {chs_size}",
     );
+}
+
+/// Cross-check (geometry): our CHS ladder against the reference tool's,
+/// with no copy of ours standing in for theirs.
+///
+/// The reference tool creates an image; we read the geometry *it* chose
+/// out of the footer *it* wrote, and ask our ladder for the geometry of
+/// a disk of exactly `C * H * S * 512` bytes. It must answer the same
+/// triple.
+///
+/// Why that is a real check and not a tautology: for a size that is
+/// exactly a representable geometry every division in the spec's ladder
+/// divides evenly, so a conforming implementation is a fixed point on
+/// its own output. Ours agreeing on all of these means it takes the
+/// same rungs in the same order with the same bounds. A mistyped rung,
+/// a `>` where the spec says `>=`, or a 1000 where it says 1024 moves
+/// at least one of these off its fixed point.
+///
+/// What this must NOT do is ask both implementations for the geometry
+/// of a *requested* size. The reference tool rounds a creation request
+/// up to a geometry that covers it; the spec's algorithm truncates. At
+/// 4 MiB the tool answers C=121 and the spec answers C=120, and both
+/// are right about different questions. Feeding it the geometry rather
+/// than the request is what removes that difference.
+///
+/// `tests/reference_geometry.rs` pins these same geometries as a table
+/// so the default `cargo test` keeps the check without the tool; this
+/// is the live version that would notice the pins going stale.
+#[test]
+fn qemu_geometry_is_a_fixed_point_of_our_ladder() {
+    // Dynamic subformat throughout: the footer is identical, and the
+    // file stays sparse, so the 127 GiB row costs nothing.
+    // 76M/84M/100M/126M are not arbitrary: at those sizes the tool
+    // settles on head counts between 9 and 15, in a band where
+    // `cylinders * heads` rounds up differently against 1024 than
+    // against 1000. They are what makes the head divisor checkable
+    // here rather than only in the pinned table.
+    let sizes = [
+        "1M", "4M", "8M", "64M", "68M", "76M", "84M", "100M", "126M", "160M", "512M", "2G", "31G",
+        "127G",
+    ];
+
+    for size in sizes {
+        let p = vhd_path(&format!("geom-{size}"));
+        qemu_create(&p, size, None);
+
+        let (c, h, s) = footer_geometry(&p);
+        assert!(
+            c > 0 && h > 0 && s > 0,
+            "reference tool wrote a degenerate geometry {c}/{h}/{s} for {size}"
+        );
+
+        let described = c as u64 * h as u64 * s as u64 * 512;
+        assert_eq!(
+            chs_for_size(described),
+            (c, h, s),
+            "reference tool chose {c}/{h}/{s} for a {size} image ({described} bytes of \
+             geometry); our ladder disagrees about the geometry of that size"
+        );
+    }
 }
