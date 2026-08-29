@@ -630,19 +630,21 @@ impl VhdReader {
     ///   3. Rewrite the trailing footer mirror at the new tail.
     ///      → flush
     ///
-    /// The tail is *read* before step 1 and *advanced* between steps 2
-    /// and 3, and that placement is the whole of the failure handling —
-    /// there is no rollback, because the commit point is derived from
-    /// what is already durable rather than guessed at afterwards:
+    /// The tail is *read* before step 1 and *advanced* between steps 1
+    /// and 2, and that placement is the whole of the failure handling —
+    /// there is no rollback, because the commit point is the last
+    /// moment the space is provably free rather than a guess made
+    /// afterwards:
     ///
-    ///   * Fail in step 1 or step 2 and the tail never moved. All that
-    ///     is out there is a zeroed range nothing references, and the
-    ///     next allocation reuses the same offset.
-    ///   * Fail in step 3 and the tail has already moved, which is
-    ///     required: step 2 published the block in the on-disk BAT, so
-    ///     the space is live and must never be handed out twice. What
-    ///     is stale is the footer mirror, which the crash-safety note
-    ///     on `write_sparse` already covers.
+    ///   * Fail in step 1 and the tail never moved. All that is out
+    ///     there is a zeroed range nothing references, and the next
+    ///     allocation reuses the same offset.
+    ///   * Fail in step 2 or step 3 and the tail has already moved.
+    ///     From the moment the BAT write is issued the entry may be on
+    ///     the device whatever the call returns, so the range has to be
+    ///     treated as live and never handed out again. The block leaks;
+    ///     a disk-image checker recovers it, and unlike aliasing it
+    ///     costs no data.
     ///
     /// The version this replaces reserved the tail up front and, on a
     /// step-1 failure, "rolled back" by assigning the tail an absolute
@@ -680,19 +682,36 @@ impl VhdReader {
         self.dev_write(new_block_off, &zeros)?;
         self.dev_flush()?;
 
+        // Commit the tail before step 2 is even issued. The instant
+        // the BAT write goes to the device we stop being able to prove
+        // the entry did not land: a write that reports an error may
+        // still have reached the platter, and a flush that fails leaves
+        // it in exactly the same unknown state. So this is the last
+        // moment at which the space is provably free.
+        //
+        // Committing here leaks a block if step 2 fails. Committing
+        // after step 2 would instead hand the same host range out twice
+        // whenever the entry landed and the call reported failure — the
+        // second allocation zeroes a range the BAT already points at.
+        // A leak is recoverable by a disk-image checker; aliasing is
+        // silent data loss.
+        {
+            let mut tail = self.next_alloc_off.lock().unwrap();
+            *tail = Some(new_block_off + block_total);
+        }
+
         // Step 2: publish the new block in the on-disk BAT.
         let bat_value = (new_block_off / SECTOR_SIZE) as u32;
         let bat_entry_off = dyn_hdr.table_offset + (block_idx as u64) * 4;
         self.dev_write(bat_entry_off, &bat_value.to_be_bytes())?;
         self.dev_flush()?;
 
-        // The block is referenced on disk now, so the space is spent:
-        // commit the tail, and mirror the entry into the cached BAT
-        // through the caller's guard.
-        {
-            let mut tail = self.next_alloc_off.lock().unwrap();
-            *tail = Some(new_block_off + block_total);
-        }
+        // Durable: mirror the entry into the cached BAT through the
+        // caller's guard. Reached only on success, so a failed step 2
+        // leaves the cached BAT saying "unallocated" — which is the
+        // safe direction, since the next write to this block allocates
+        // afresh at the already-advanced tail and overwrites the entry
+        // rather than sharing a range with it.
         let bat = bat_guard
             .as_mut()
             .ok_or(Error::Corrupt("allocate but no BAT"))?;
