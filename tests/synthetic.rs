@@ -11,6 +11,7 @@
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
 
 use vhd::dynamic::{
     compute_checksum as dyn_cs, BAT_UNALLOCATED, DYN_HEADER_COOKIE, DYN_HEADER_SIZE,
@@ -802,6 +803,165 @@ fn build_dynamic_vhd_all_sparse(path: &PathBuf) {
     f.write_all_at(&hdr, DYN_HEADER_OFF).unwrap();
     f.write_all_at(&bat, BAT_OFF).unwrap();
     f.write_all_at(&footer, END_OF_DATA).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent writers
+// ---------------------------------------------------------------------------
+
+/// `VhdReader` is `Sync`, `write_at` takes `&self`, and `capi.rs` hands
+/// the reader out inside an `Arc`, so two threads writing at once is a
+/// supported use rather than a hypothetical one. These two tests are the
+/// only thing in the suite that exercises it.
+///
+/// Both look for a timing window rather than a fixed ordering, so each
+/// runs several trials against a fresh image. One trial that happened to
+/// serialise would prove nothing either way.
+const CONCURRENCY_TRIALS: usize = 8;
+
+/// The all-sparse fixture's data ends at sector 5, one block costs a
+/// bitmap sector plus the 4 KiB block, and the footer mirror trails
+/// whatever the last block is. So the file length says exactly how many
+/// blocks were allocated.
+const SPARSE_FIXTURE_END_OF_DATA: u64 = 512 * 5;
+const SPARSE_FIXTURE_BLOCK_TOTAL: u64 = 512 + 4096;
+
+fn file_len_after_allocations(n: u64) -> u64 {
+    SPARSE_FIXTURE_END_OF_DATA + n * SPARSE_FIXTURE_BLOCK_TOTAL + FOOTER_SIZE as u64
+}
+
+/// Run `(offset, payload)` writes on one thread each, released together.
+fn write_concurrently(reader: &Arc<VhdReader>, writes: [(u64, u8); 2], len: usize) {
+    let gate = Arc::new(Barrier::new(writes.len()));
+    let handles: Vec<_> = writes
+        .into_iter()
+        .map(|(offset, fill)| {
+            let reader = Arc::clone(reader);
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                let payload = vec![fill; len];
+                gate.wait();
+                reader.write_at(offset, &payload).unwrap();
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().expect("writer thread panicked");
+    }
+}
+
+fn assert_reads_back(reader: &VhdReader, offset: u64, fill: u8, len: usize, what: &str) {
+    let mut got = vec![0u8; len];
+    reader.read_at(offset, &mut got).unwrap();
+    assert!(
+        got.iter().all(|&b| b == fill),
+        "{what}: expected {len} bytes of {fill:#04x} at offset {offset}, got {:02x?}...",
+        &got[..8.min(got.len())]
+    );
+}
+
+/// Two threads writing into the *same* unallocated block must leave one
+/// allocation behind, with both payloads readable.
+///
+/// Two distinct ways this fails without a lock held across the whole of
+/// one block's write:
+///
+///   * "Read the BAT entry, then allocate if it is unallocated" is a
+///     check-then-act. Both threads see `BAT_UNALLOCATED`, both
+///     allocate, the image grows by two blocks, one BAT entry wins, and
+///     the loser's payload is stranded in a block nothing points at.
+///   * The sector bitmap's read-modify-write is a check-then-act too.
+///     Both threads read the same bitmap, and the second write-back
+///     drops the first thread's bits — the payload bytes are in the
+///     block, but the bitmap says that sector was never written, so it
+///     reads back as zero.
+///
+/// The file-length assertion catches the first; the read-back
+/// assertions catch either.
+#[test]
+fn concurrent_writes_into_one_unallocated_block_allocate_once() {
+    // Both offsets sit inside block 0 ([0, 4096)) and in different
+    // sectors, so a correct run leaves both payloads intact.
+    const A_OFF: u64 = 0;
+    const B_OFF: u64 = 2048;
+    const LEN: usize = 512;
+
+    for trial in 0..CONCURRENCY_TRIALS {
+        let path = tmp_path(&format!("concurrent_same_block_{trial}"));
+        build_dynamic_vhd_all_sparse(&path);
+
+        let r = Arc::new(VhdReader::open_rw(&path).unwrap());
+        write_concurrently(&r, [(A_OFF, 0xA1), (B_OFF, 0xB2)], LEN);
+        r.flush_writes().unwrap();
+        drop(r);
+
+        let len = std::fs::metadata(&path).unwrap().len();
+        let expected = file_len_after_allocations(1);
+        assert_eq!(
+            len, expected,
+            "trial {trial}: two writers into one unallocated block must allocate it \
+             once — the image is {len} bytes, one allocation is {expected}"
+        );
+
+        let r2 = VhdReader::open(&path).unwrap();
+        assert_reads_back(
+            &r2,
+            A_OFF,
+            0xA1,
+            LEN,
+            &format!("trial {trial}, first writer"),
+        );
+        assert_reads_back(
+            &r2,
+            B_OFF,
+            0xB2,
+            LEN,
+            &format!("trial {trial}, second writer"),
+        );
+        drop(r2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Two threads writing into *different* unallocated blocks must produce
+/// two allocations at distinct offsets, both intact.
+///
+/// This is what the tail offset exists for. If both allocations
+/// resolved to the same tail — or if one thread's failure handling
+/// reset the tail over the other thread's live reservation — the second
+/// block would be written on top of the first.
+#[test]
+fn concurrent_writes_into_different_unallocated_blocks_allocate_both() {
+    // Block 0 is [0, 4096); block 1 is [4096, 8192).
+    const A_OFF: u64 = 0;
+    const B_OFF: u64 = 4096;
+    const LEN: usize = 512;
+
+    for trial in 0..CONCURRENCY_TRIALS {
+        let path = tmp_path(&format!("concurrent_two_blocks_{trial}"));
+        build_dynamic_vhd_all_sparse(&path);
+
+        let r = Arc::new(VhdReader::open_rw(&path).unwrap());
+        write_concurrently(&r, [(A_OFF, 0xC3), (B_OFF, 0xD4)], LEN);
+        r.flush_writes().unwrap();
+        drop(r);
+
+        let len = std::fs::metadata(&path).unwrap().len();
+        let expected = file_len_after_allocations(2);
+        assert_eq!(
+            len, expected,
+            "trial {trial}: writers into two unallocated blocks must allocate both \
+             — the image is {len} bytes, two allocations are {expected}"
+        );
+
+        let r2 = VhdReader::open(&path).unwrap();
+        assert_reads_back(&r2, A_OFF, 0xC3, LEN, &format!("trial {trial}, block 0"));
+        assert_reads_back(&r2, B_OFF, 0xD4, LEN, &format!("trial {trial}, block 1"));
+        drop(r2);
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 #[test]

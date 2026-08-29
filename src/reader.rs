@@ -55,8 +55,11 @@ pub struct VhdReader {
     dynamic: Option<DynamicHeader>,
     /// `None` for fixed disks. For dynamic/differencing, the cached
     /// in-memory BAT (always small — `max_table_entries * 4` bytes).
-    /// `Mutex` because dynamic writes mutate entries in place when
-    /// allocating a block.
+    ///
+    /// This is the write lock for sparse images, not merely a container
+    /// lock, and [`VhdReader::write_sparse`] holds it across one whole
+    /// block's write rather than just around the entry read. See that
+    /// function for what breaks otherwise.
     bat: Mutex<Option<Vec<u32>>>,
     /// Cached size of one block bitmap in bytes (sector-padded).
     bitmap_size: u64,
@@ -67,8 +70,14 @@ pub struct VhdReader {
     virtual_size: u64,
     /// For dynamic VHDs: host offset where the trailing footer currently
     /// sits — equivalently, the offset where the next block's bitmap
-    /// will be placed. Updated under lock when a fresh block is
-    /// allocated. `None` for fixed disks.
+    /// will be placed. `None` for fixed disks.
+    ///
+    /// Only ever read or advanced from
+    /// [`VhdReader::allocate_block_locked`], which runs with `bat`
+    /// already held — so the two fields describe one consistent
+    /// allocation state and there is no second lock order to get wrong.
+    /// It stays a separate `Mutex` only because `&self` methods need to
+    /// mutate it.
     next_alloc_off: Mutex<Option<u64>>,
     /// Cached complete footer bytes (the same value mirrored at offset 0
     /// and at the file tail for dynamic/differencing). Used to rewrite
@@ -310,6 +319,19 @@ impl VhdReader {
     /// Write exactly `buf.len()` bytes starting at virtual `offset`.
     /// Supported on fixed and dynamic VHDs; differencing returns
     /// [`Error::ReadOnly`].
+    ///
+    /// Safe to call from several threads on one shared reader — which
+    /// is not a courtesy, it is forced: this type is `Sync`, this
+    /// method takes `&self`, and the C ABI hands the reader out inside
+    /// an `Arc`, so there is no way to hand a caller a single-writer
+    /// handle even if we wanted to. On a dynamic image the internal
+    /// bookkeeping (block allocation and the per-block sector bitmap)
+    /// is serialised for that reason (see `write_sparse`). Two writes
+    /// to *overlapping* byte
+    /// ranges still race with each other for which bytes win, exactly
+    /// as two writes to one file descriptor would — the guarantee here
+    /// is that the image structure stays consistent and that no
+    /// non-overlapping write is lost.
     pub fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
         if !self.writable() {
             return Err(Error::ReadOnly);
@@ -491,13 +513,27 @@ impl VhdReader {
     ///   - Splice the user's bytes into the block, mark the touched
     ///     sectors in the bitmap.
     ///
-    /// Crash-safety order per allocation: data sectors → bitmap →
-    /// BAT entry → footer mirror, with a `dev.flush()` between each
-    /// step. A crash mid-allocation leaves the BAT entry pointing at
-    /// the old (still unallocated) value or the BAT is updated but the
-    /// footer mirror is stale — both cases keep the image readable
-    /// (the leaked tail bytes are recoverable by `qemu-img check`-type
-    /// tooling, and on re-open the next allocation overwrites them).
+    /// Crash-safety order for a block that has to be allocated: the
+    /// allocation lands first — zeroed block, then BAT entry, then
+    /// footer mirror, with the detail on
+    /// [`VhdReader::allocate_block_locked`] — and only then the
+    /// caller's bytes and the bitmap bits that make them visible, with
+    /// a `dev.flush()` between steps. A crash part-way leaves the BAT
+    /// entry still unallocated, or the BAT updated with a stale footer
+    /// mirror; both keep the image readable (the leaked tail bytes are
+    /// recoverable by a disk-image checker, and on re-open the next
+    /// allocation overwrites them).
+    ///
+    /// ## Concurrent writers
+    ///
+    /// `VhdReader` is `Sync`, `write_at` takes `&self`, and `capi.rs`
+    /// hands the reader out inside an `Arc`, so this function has to
+    /// work when two threads are inside it at once. It does, and the
+    /// mechanism is blunt: `self.bat` is held for the whole of one
+    /// block's write, so blocks are mutated one at a time image-wide.
+    /// Sparse writes therefore serialise. They already `fsync` per
+    /// block, so the lock is not what makes them slow, and one lock is
+    /// the version of this that is obviously correct.
     fn write_sparse(&self, offset: u64, buf: &[u8]) -> Result<()> {
         let dyn_hdr = self
             .dynamic
@@ -518,21 +554,39 @@ impl VhdReader {
             let bytes_remaining_in_block = block_size - in_block;
             let chunk_len = std::cmp::min(bytes_remaining_in_block, end - cursor) as usize;
 
-            // Fast-path: read current BAT entry under lock, drop lock
-            // before touching the device.
-            let bat_entry = {
-                let bat_guard = self.bat.lock().unwrap();
-                let bat = bat_guard
-                    .as_ref()
-                    .ok_or(Error::Corrupt("sparse write but no BAT"))?;
-                if block_idx >= bat.len() {
-                    return Err(Error::Corrupt("block_idx past BAT"));
-                }
-                bat[block_idx]
-            };
+            // Everything below runs under one lock hold, because two
+            // check-then-act sequences live in it and neither survives
+            // another writer acting in the gap:
+            //
+            //   * "is this BAT entry unallocated, and if so allocate a
+            //     block for it" — two threads writing into the same
+            //     unallocated block would both read BAT_UNALLOCATED and
+            //     both allocate. One BAT entry wins; the loser's block
+            //     is orphaned in the file with the loser's payload
+            //     inside it, and that write is silently lost.
+            //   * "read the sector bitmap, set some bits, write it
+            //     back" in set_bitmap_range — two threads writing
+            //     different sectors of one block would read the same
+            //     bitmap and the second write-back would drop the
+            //     first's bits. The payload bytes land, but the bitmap
+            //     says those sectors were never written, so they read
+            //     back as zero.
+            //
+            // Releasing the lock between the read and the allocation —
+            // which is what this used to do, in the name of not holding
+            // it across device I/O — is exactly the gap the first of
+            // those needs.
+            let mut bat_guard = self.bat.lock().unwrap();
+            let bat = bat_guard
+                .as_ref()
+                .ok_or(Error::Corrupt("sparse write but no BAT"))?;
+            if block_idx >= bat.len() {
+                return Err(Error::Corrupt("block_idx past BAT"));
+            }
+            let bat_entry = bat[block_idx];
 
             let block_host_off = if bat_entry == BAT_UNALLOCATED {
-                self.allocate_block(block_idx)?
+                self.allocate_block_locked(&mut bat_guard, block_idx)?
             } else {
                 bat_entry as u64 * SECTOR_SIZE
             };
@@ -546,6 +600,7 @@ impl VhdReader {
             // Mark the touched sectors in the bitmap.
             self.set_bitmap_range(block_host_off, in_block, chunk_len as u64)?;
             self.dev_flush()?;
+            drop(bat_guard);
 
             cursor += chunk_len as u64;
             written += chunk_len;
@@ -558,6 +613,14 @@ impl VhdReader {
     /// `block_idx` at it, push the trailing footer mirror past it.
     /// Returns the host offset where the new block's bitmap starts.
     ///
+    /// Callable only with the BAT lock already held; `bat_guard` is
+    /// that lock. Taking it by `&mut` rather than re-locking inside is
+    /// what makes it a compile-time fact that the caller's "this entry
+    /// is unallocated" test and the allocation below cannot be
+    /// separated by another writer — and it makes this the only code
+    /// that touches `next_alloc_off`, so the tail needs no lock
+    /// discipline of its own beyond "under `bat`".
+    ///
     /// Crash-safety order:
     ///   1. Zero-init the new block's bitmap+data range on disk
     ///      (so a partial subsequent step can't expose old tail bytes).
@@ -567,9 +630,32 @@ impl VhdReader {
     ///   3. Rewrite the trailing footer mirror at the new tail.
     ///      → flush
     ///
-    /// In-memory BAT and `next_alloc_off` are updated under their locks
-    /// after every disk step lands.
-    fn allocate_block(&self, block_idx: usize) -> Result<u64> {
+    /// The tail is *read* before step 1 and *advanced* between steps 2
+    /// and 3, and that placement is the whole of the failure handling —
+    /// there is no rollback, because the commit point is derived from
+    /// what is already durable rather than guessed at afterwards:
+    ///
+    ///   * Fail in step 1 or step 2 and the tail never moved. All that
+    ///     is out there is a zeroed range nothing references, and the
+    ///     next allocation reuses the same offset.
+    ///   * Fail in step 3 and the tail has already moved, which is
+    ///     required: step 2 published the block in the on-disk BAT, so
+    ///     the space is live and must never be handed out twice. What
+    ///     is stale is the footer mirror, which the crash-safety note
+    ///     on `write_sparse` already covers.
+    ///
+    /// The version this replaces reserved the tail up front and, on a
+    /// step-1 failure, "rolled back" by assigning the tail an absolute
+    /// value — its own pre-advance offset. That is not an undo: it
+    /// discards any reservation another thread made in between, and the
+    /// next allocation then writes over a block already in use. Steps 2
+    /// and 3 had no unwind at all and left the tail advanced past a
+    /// block that was never published.
+    fn allocate_block_locked(
+        &self,
+        bat_guard: &mut std::sync::MutexGuard<'_, Option<Vec<u32>>>,
+        block_idx: usize,
+    ) -> Result<u64> {
         let dyn_hdr = self
             .dynamic
             .as_ref()
@@ -578,13 +664,12 @@ impl VhdReader {
         let bitmap_size = self.bitmap_size;
         let block_total = bitmap_size + block_size;
 
-        // Reserve the next tail offset under lock so concurrent
-        // allocations don't collide.
+        // Where the next block goes. Read, not reserved: nothing else
+        // can allocate while the caller holds the BAT lock, so the
+        // offset stays ours until we commit it below.
         let new_block_off = {
-            let mut tail = self.next_alloc_off.lock().unwrap();
-            let cur = tail.ok_or(Error::Corrupt("allocate but no tail offset (fixed?)"))?;
-            *tail = Some(cur + block_total);
-            cur
+            let tail = self.next_alloc_off.lock().unwrap();
+            tail.ok_or(Error::Corrupt("allocate but no tail offset (fixed?)"))?
         };
 
         // Step 1: zero-init bitmap + data area at the new tail.
@@ -592,29 +677,26 @@ impl VhdReader {
         // non-growable BlockDevice impls this surfaces an I/O error
         // up to the caller, which is the right behaviour.
         let zeros = vec![0u8; block_total as usize];
-        if let Err(e) = self.dev_write(new_block_off, &zeros) {
-            // Roll back the tail reservation — the device refused.
-            let mut tail = self.next_alloc_off.lock().unwrap();
-            *tail = Some(new_block_off);
-            return Err(e);
-        }
-        if let Err(e) = self.dev_flush() {
-            let mut tail = self.next_alloc_off.lock().unwrap();
-            *tail = Some(new_block_off);
-            return Err(e);
-        }
+        self.dev_write(new_block_off, &zeros)?;
+        self.dev_flush()?;
 
-        // Step 2: publish the new block in the BAT (on disk + in mem).
+        // Step 2: publish the new block in the on-disk BAT.
         let bat_value = (new_block_off / SECTOR_SIZE) as u32;
         let bat_entry_off = dyn_hdr.table_offset + (block_idx as u64) * 4;
         self.dev_write(bat_entry_off, &bat_value.to_be_bytes())?;
         self.dev_flush()?;
+
+        // The block is referenced on disk now, so the space is spent:
+        // commit the tail, and mirror the entry into the cached BAT
+        // through the caller's guard.
         {
-            let mut bat_guard = self.bat.lock().unwrap();
-            if let Some(bat) = bat_guard.as_mut() {
-                bat[block_idx] = bat_value;
-            }
+            let mut tail = self.next_alloc_off.lock().unwrap();
+            *tail = Some(new_block_off + block_total);
         }
+        let bat = bat_guard
+            .as_mut()
+            .ok_or(Error::Corrupt("allocate but no BAT"))?;
+        bat[block_idx] = bat_value;
 
         // Step 3: rewrite the trailing footer mirror at the new tail.
         // The bytes haven't changed (footer.current_size etc are

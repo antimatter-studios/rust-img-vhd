@@ -94,14 +94,31 @@ fn vhd_timestamp_now() -> u32 {
     }
 }
 
-/// Disk geometry pseudo-code from the VHD spec section "Disk Geometry"
-/// (October 2006), reproduced literally. Input: total sectors of the
-/// virtual disk (size_bytes / 512). Output: (cylinders, heads,
-/// sectors-per-track).
+/// Legacy CHS geometry for a disk of `size_bytes`, per the VHD spec's
+/// "Disk Geometry" pseudo-code (Microsoft VHD Image Format
+/// Specification, October 2006), reproduced literally.
 ///
-/// The spec caps everything below the magic 65535*16*255 ceiling and
-/// promises the result is "as close as possible" to the requested size.
-fn chs_for_size(size_bytes: u64) -> (u16, u8, u8) {
+/// Input is a **byte count**; the spec's pseudo-code starts from a
+/// sector count, and the conversion happens on the first line of the
+/// body. Output is `(cylinders, heads, sectors_per_track)` — the three
+/// fields of the footer's `disk_geometry` word.
+///
+/// The geometry does not have to describe the disk exactly, and in
+/// general it does not: every division in the ladder truncates, so
+/// `C * H * S * 512` is the requested size **rounded down** to the
+/// nearest representable geometry. At 4 MiB (8192 sectors) the answer
+/// is `C=120, H=4, S=17` — 8160 sectors, 16 KiB short of the request.
+/// That is why the footer carries `current_size` separately: the byte
+/// count is exact, the geometry is an approximation, and a reader that
+/// derives one from the other will be off by up to a track.
+///
+/// Sizes above the `65535 * 16 * 255` sector ceiling clamp to it, so
+/// the returned tuple always fits the footer's `u16`/`u8`/`u8` fields.
+///
+/// Public because the geometry tests validate it directly against
+/// geometries produced by an independent VHD implementation — see
+/// `tests/reference_geometry.rs`.
+pub fn chs_for_size(size_bytes: u64) -> (u16, u8, u8) {
     // VHD spec uses 512-byte sectors throughout.
     let mut total_sectors = size_bytes / 512;
     if total_sectors > 65535u64 * 16 * 255 {
