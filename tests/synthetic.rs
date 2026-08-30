@@ -10,22 +10,19 @@
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Barrier};
 
 use vhd::dynamic::{
     compute_checksum as dyn_cs, BAT_UNALLOCATED, DYN_HEADER_COOKIE, DYN_HEADER_SIZE,
 };
 use vhd::footer::{compute_checksum as footer_cs, FOOTER_COOKIE, FOOTER_SIZE};
+mod common;
+use common::{tmp_path_with, TempPath};
 use vhd::{DiskType, VhdReader};
 
-fn tmp_path(name: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let mut p = std::env::temp_dir();
-    p.push(format!("vhd_synth_{}_{n}_{name}.vhd", std::process::id()));
-    p
+fn tmp_path(name: &str) -> TempPath {
+    tmp_path_with("vhd_synth", name, "vhd")
 }
 
 trait WriteAt {
@@ -83,8 +80,6 @@ fn fixed_round_trip() {
     let mut buf = vec![0u8; 256];
     r.read_at(100, &mut buf).unwrap();
     assert_eq!(buf, pattern[100..356]);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -101,7 +96,6 @@ fn fixed_read_past_end_errors() {
     let mut buf = [0u8; 16];
     let err = r.read_at(virt_size - 8, &mut buf).unwrap_err();
     matches!(err, vhd::Error::OutOfBounds { .. });
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +114,7 @@ fn fixed_read_past_end_errors() {
 ///
 /// virt_size = 8 KiB; block_size = 4 KiB; max_table_entries = 2.
 /// Block 0 allocated; block 1 sparse.
-fn build_dynamic_vhd(path: &PathBuf, block0_data: &[u8], bitmap: u8) {
+fn build_dynamic_vhd(path: &Path, block0_data: &[u8], bitmap: u8) {
     const SECTOR: u64 = 512;
     const FOOTER_OFF: u64 = 0;
     const DYN_HEADER_OFF: u64 = SECTOR; // sector 1
@@ -200,8 +194,6 @@ fn dynamic_allocated_block_reads_back_data() {
             block.len()
         );
     }
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -214,7 +206,6 @@ fn dynamic_unallocated_block_reads_zeros() {
     let mut buf = vec![0xAAu8; 4096];
     r.read_at(4096, &mut buf).unwrap(); // virt block 1 — unallocated
     assert!(buf.iter().all(|&b| b == 0));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -240,7 +231,6 @@ fn dynamic_partial_bitmap_zero_fills_unset_sectors() {
             "sector {sector}: allocated={allocated}"
         );
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -291,12 +281,7 @@ fn differencing_falls_through_to_parent_for_unallocated() {
     let _ = std::fs::remove_file(&parent_path);
 }
 
-fn build_differencing_vhd(
-    child_path: &PathBuf,
-    parent_path: &Path,
-    bitmap: u8,
-    child_block_byte: u8,
-) {
+fn build_differencing_vhd(child_path: &Path, parent_path: &Path, bitmap: u8, child_block_byte: u8) {
     const SECTOR: u64 = 512;
     const DYN_HEADER_OFF: u64 = SECTOR;
     const BAT_OFF: u64 = SECTOR * 3;
@@ -373,8 +358,6 @@ fn create_fixed_round_trip_pattern() {
     r2.read_at(0, &mut buf).unwrap();
     assert_eq!(buf, pattern);
     assert_eq!(r2.virtual_size(), virt_size);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -396,8 +379,6 @@ fn create_fixed_partial_write_within_bounds() {
     let mut zero = vec![0xFFu8; 1024];
     r.read_at(0, &mut zero).unwrap();
     assert!(zero.iter().all(|&b| b == 0));
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -408,7 +389,6 @@ fn write_past_virtual_size_returns_out_of_bounds() {
     let buf = vec![0u8; 16];
     let err = r.write_at(virt_size - 8, &buf).unwrap_err();
     assert!(matches!(err, vhd::Error::OutOfBounds { .. }), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -424,7 +404,6 @@ fn write_into_footer_region_returns_out_of_bounds() {
     // After a rejected write, the footer must still parse cleanly: reopen.
     drop(r);
     let _r2 = VhdReader::open(&path).expect("footer survives rejected write");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -442,7 +421,6 @@ fn fixed_opened_read_only_is_not_writable() {
     let buf = [0u8; 16];
     let err = r.write_at(0, &buf).unwrap_err();
     assert!(matches!(err, vhd::Error::ReadOnly), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -460,7 +438,6 @@ fn fixed_opened_read_write_is_writable() {
     let mut buf = vec![0u8; 512];
     r.read_at(1024, &mut buf).unwrap();
     assert_eq!(buf, chunk);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -475,7 +452,6 @@ fn dynamic_opened_read_only_rejects_writes() {
     let buf = [0u8; 16];
     let err = r.write_at(0, &buf).unwrap_err();
     assert!(matches!(err, vhd::Error::ReadOnly), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -488,7 +464,6 @@ fn dynamic_opened_rw_is_writable() {
     assert_eq!(r.disk_type(), DiskType::Dynamic);
     assert!(r.writable());
     assert!(<VhdReader as fs_core::BlockDevice>::is_writable(&r));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -530,7 +505,6 @@ fn fs_core_blockdevice_write_passes_through_for_fixed_rw() {
     let mut buf = vec![0u8; 256];
     r.read_at(512, &mut buf).unwrap();
     assert_eq!(buf, payload);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -540,7 +514,6 @@ fn create_fixed_rejects_unaligned_size() {
         Ok(_) => panic!("expected error for unaligned size"),
         Err(e) => assert!(matches!(e, vhd::Error::Corrupt(_)), "got {e:?}"),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -572,7 +545,6 @@ fn open_on_device_round_trips_fixed_image() {
     let mut buf = vec![0u8; 256];
     r.read_at(64, &mut buf).unwrap();
     assert_eq!(buf, pattern[64..64 + 256]);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -595,7 +567,6 @@ fn open_rw_on_device_supports_fixed_writes() {
     let mut buf = vec![0u8; 256];
     r.read_at(512, &mut buf).unwrap();
     assert_eq!(buf, payload);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -613,7 +584,6 @@ fn open_rw_on_device_rejects_readonly_inner() {
         Err(e) => panic!("expected ReadOnly, got error {e:?}"),
         Ok(_) => panic!("expected ReadOnly, got Ok"),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -678,7 +648,6 @@ fn dynamic_write_into_existing_block_round_trips() {
     let mut buf2 = vec![0u8; 256];
     r2.read_at(100, &mut buf2).unwrap();
     assert_eq!(buf2, payload);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -720,7 +689,6 @@ fn dynamic_write_allocates_fresh_block() {
     r2.read_at(4096 + 200, &mut buf2).unwrap();
     assert_eq!(buf2, payload);
     assert_eq!(r2.virtual_size(), 8 * 1024);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -765,12 +733,11 @@ fn dynamic_write_spanning_block_boundary_allocates_both() {
     let mut buf2 = vec![0u8; 2048];
     r2.read_at(start, &mut buf2).unwrap();
     assert_eq!(buf2, payload);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Like `build_dynamic_vhd` but with both BAT entries marked unallocated.
 /// Used for tests that exercise the allocation path on first write.
-fn build_dynamic_vhd_all_sparse(path: &PathBuf) {
+fn build_dynamic_vhd_all_sparse(path: &Path) {
     const SECTOR: u64 = 512;
     const FOOTER_OFF: u64 = 0;
     const DYN_HEADER_OFF: u64 = SECTOR;
@@ -919,8 +886,6 @@ fn concurrent_writes_into_one_unallocated_block_allocate_once() {
             &format!("trial {trial}, second writer"),
         );
         drop(r2);
-
-        let _ = std::fs::remove_file(&path);
     }
 }
 
@@ -959,8 +924,6 @@ fn concurrent_writes_into_different_unallocated_blocks_allocate_both() {
         assert_reads_back(&r2, A_OFF, 0xC3, LEN, &format!("trial {trial}, block 0"));
         assert_reads_back(&r2, B_OFF, 0xD4, LEN, &format!("trial {trial}, block 1"));
         drop(r2);
-
-        let _ = std::fs::remove_file(&path);
     }
 }
 
@@ -976,8 +939,6 @@ fn fs_core_blockread_size_matches_virtual() {
 
     let r = VhdReader::open(&path).unwrap();
     assert_eq!(<VhdReader as fs_core::BlockRead>::size_bytes(&r), virt_size);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A dynamic VHD whose `max_table_entries` is absurd is refused at open
@@ -1028,5 +989,4 @@ fn absurd_max_table_entries_is_refused_before_allocating() {
         msg.contains("BAT"),
         "the refusal should name the BAT, got: {msg}"
     );
-    let _ = std::fs::remove_file(&path);
 }

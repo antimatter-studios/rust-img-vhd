@@ -34,7 +34,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-const SECTOR_SIZE: u64 = 512;
+use crate::format::SECTOR_SIZE;
 
 /// Maximum differencing-chain depth. A pathological chain (or cycle)
 /// is rejected rather than blowing the stack.

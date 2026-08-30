@@ -6,39 +6,16 @@
 //! write→reopen→read round-trip than the synthetic suite covers.
 
 use std::io::{Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+mod common;
+use common::{tmp_path_with, TempPath};
 use vhd::{Error, VhdReader};
 
 const VSIZE: u64 = 1024 * 1024; // 1 MiB fixed disk
 
 fn tmp_path(name: &str) -> TempPath {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let mut p = std::env::temp_dir();
-    p.push(format!("vhd_corrupt_{}_{n}_{name}.vhd", std::process::id()));
-    TempPath(p)
-}
-
-/// RAII temp-file path: removes the backing file on drop so a panicking
-/// assertion can't leak fixtures into the temp dir across CI runs.
-struct TempPath(PathBuf);
-impl std::ops::Deref for TempPath {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-impl AsRef<Path> for TempPath {
-    fn as_ref(&self) -> &Path {
-        &self.0
-    }
-}
-impl Drop for TempPath {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+    tmp_path_with("vhd_corrupt", name, "vhd")
 }
 
 /// Create a fixed VHD with `VSIZE` bytes of virtual capacity and return
