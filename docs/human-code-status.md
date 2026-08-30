@@ -44,9 +44,17 @@ checksum incidentally catching it. Against the unbounded code, `open` succeeds.
 
 [#23](https://github.com/antimatter-studios/rust-img-vhd/pull/23).
 
-### H2 — every constant in the CHS geometry ladder is a bare literal — **fixable, not yet done**
+### H2 — every constant in the CHS geometry ladder is a bare literal — **fixed**
 
-Grouped with H7/M4/M5 as one naming change.
+`format::chs` names all eight: the three field ceilings, the two derived sector
+ceilings, the three sectors-per-track rungs, the minimum head count and the
+legacy cylinders-per-head budget. The ladder now reads as the specification's
+pseudo-code rather than as arithmetic on bare digits.
+
+The two derived ceilings are checked with `const _: () = assert!(…)` rather than
+a test — including that the ladder's last rung stays below saturation, without
+which the else-arm is unreachable. A build failure is a better place to learn
+that than a test run.
 
 ### H3 — `open_parent`'s doc described behaviour the function does not have — **fixed**
 
@@ -72,9 +80,25 @@ Same PR.
 
 ### H6 — the BAT allocated from an unvalidated `u32` — **fixed**, see above.
 
-### H7 — footer and dynamic-header offsets re-typed as literals in five places — **fixable, not yet done**
+### H7 — footer and dynamic-header offsets re-typed as literals in five places — **fixed, but not the way it was written up**
 
-Grouped with H2/M4/M5.
+`format::footer_offsets` and `format::dynamic_offsets` name every field, and the
+parser and the builder now index them. Those two *must* agree, so they share one
+definition.
+
+**The test fixtures were deliberately left alone**, which is the opposite of
+what the report proposed, and the measurement is why. Every fixture writes
+literal offsets, so a wrong constant shows up as a failure: moving `DISK_TYPE`
+by one byte fails 37 tests, shifting the footer's checksum window 22, moving the
+dynamic header's `BLOCK_SIZE` 17. Rewriting the fixtures against the constants
+would take all three to zero and leave a crate that agrees with itself and with
+nothing else.
+
+So the fixtures are the second opinion, and `format.rs` says so, in the module
+docs and in `layout_matches_the_published_specification` — a deliberate third
+copy of the table, transcribed from the specification, plus
+`no_field_overlaps_its_neighbour`, which catches a field widened without its
+neighbour moving (every individual assertion still passes in that case).
 
 ---
 
@@ -123,11 +147,28 @@ invariant across four block sizes, which is the argument both helpers rest on.
 
 Mutation-checked: `7 - (n % 8)` written as `n % 8` fails two of the three.
 
-### M1, M2, M4, M5 — duplication and unnamed wire values — **fixable, not yet done**
+### M1, M2, M4, M5 — duplication and unnamed wire values — **fixed**
 
-`read_u32`/`read_u64` byte-identical in two modules; `compute_checksum` twice
-with a different skip window; `SECTOR_SIZE` named in one module and open-coded in
-three; the disk-type wire values 2/3/4 in four places.
+All four now live in `src/format.rs`:
+
+- **M1** — one `read_u32` / `read_u64`, with the bounds question answered in the
+  doc (a short slice is a bug in this crate, not corrupt input; every caller has
+  already checked it has a whole footer or header). `footer_build` gained the
+  matching `write_u32` / `write_u64`, so the builder and the parser now index the
+  same constants and a field can only move in both at once.
+- **M2** — one `ones_complement_checksum(bytes, size, skip)`. The length and the
+  skip window were the only two differences between the copies, and they are now
+  the two arguments; writing the loop twice made it look as though there might be
+  a third.
+- **M4** — one `SECTOR_SIZE`, with the doc saying what it is *not*: the block
+  device's sector size. A VHD on a 4 KiB-sector disk still has 512-byte VHD
+  sectors, because the number belongs to the file format.
+- **M5** — `format::disk_type_wire::{FIXED, DYNAMIC, DIFFERENCING}`.
+
+Mutation-checked, and detectability went **up** rather than down, because the
+fixtures stayed literal: the shared `read_u32` flipped to little-endian fails 42
+tests where the two old copies failed 37 and 19; the shared `DISK_TYPE` moved by
+a byte fails 39 where the old copy failed 37.
 
 ### M6, M7, M8, M12 — structure and naming — **needs your decision**
 
@@ -140,23 +181,36 @@ than correcting a defect.
 M8 is worth your attention: a field and a method with the same name and
 different meanings is a trap, but renaming either touches the public surface.
 
-### M9 — `chs_for_size`'s doc describes an input the function does not take — **fixable, not yet done**
+### M9 — `chs_for_size`'s doc describes an input the function does not take — **fixed**
 
-Grouped with the naming change, since the same doc block covers the ladder
-constants H2 is about.
+The doc opens by stating the input is a byte count, that the specification's
+pseudo-code starts from a sector count instead, and that the conversion is the
+first line of the body — so the reader is not left comparing a doc about sectors
+against a signature taking bytes. Its reference to the sector ceiling now names
+`chs::MAX_ADDRESSABLE_SECTORS` rather than repeating `65535 * 16 * 255`.
 
 ### M11 — `open_path` dereferences a raw pointer but is not an `unsafe fn` — **needs your decision**
 
 Correct, and the fix is a signature change with `unsafe` semantics attached —
 worth doing deliberately rather than in a batch.
 
-### M13 — `tmp_path` written three times, only two clean up — **fixable, not yet done**
+### M13 — `tmp_path` written three times, only two clean up — **fixed**
 
-Test hygiene; a panicking assertion leaves a file behind in the third.
+One `TempPath` and one `tmp_path_with(prefix, name, ext)` in `tests/common/mod.rs`,
+used by all three suites.
+
+The third copy — `synthetic.rs` — returned a bare `PathBuf` and removed the file
+on the last line of each test, which is exactly the line a panicking assertion
+never reaches. Every failing run leaked a fixture, and these images run to a few
+MiB. `Drop` runs during unwinding, so the RAII type cleans up on the failing
+path, which was the only path that ever leaked. 25 now-redundant `remove_file`
+calls came out with it.
 
 ---
 
 ## Verification
 
-**59 tests pass, up from 56.** `chore lint` clean. The new test is the only
-behavioural change: an image whose BAT cannot fit in it is now refused at open.
+**62 tests pass, up from 56.** `chore lint` clean, including
+`--all-features`. Two behavioural changes across the whole sweep: an image whose
+BAT cannot fit in it is now refused at open, and a panicking synthetic test no
+longer leaves its fixture in the temp directory.

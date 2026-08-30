@@ -23,6 +23,7 @@ pub mod dynamic;
 pub mod error;
 pub mod footer;
 pub mod footer_build;
+pub mod format;
 pub mod reader;
 
 pub use error::{Error, Result};

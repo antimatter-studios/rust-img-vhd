@@ -22,6 +22,8 @@
 //! All multi-byte integers are big-endian.
 
 use crate::error::{Error, Result};
+use crate::format::dynamic_offsets as at;
+use crate::format::{ones_complement_checksum, read_u32, read_u64, SECTOR_SIZE};
 
 pub const DYN_HEADER_SIZE: usize = 1024;
 pub const DYN_HEADER_COOKIE: &[u8; 8] = b"cxsparse";
@@ -58,11 +60,11 @@ impl DynamicHeader {
         if bytes.len() < DYN_HEADER_SIZE {
             return Err(Error::Corrupt("dynamic header shorter than 1024 bytes"));
         }
-        if &bytes[0..8] != DYN_HEADER_COOKIE {
+        if &bytes[at::COOKIE] != DYN_HEADER_COOKIE {
             return Err(Error::Corrupt("dynamic header bad cookie"));
         }
 
-        let stored_checksum = read_u32(bytes, 36);
+        let stored_checksum = read_u32(bytes, at::CHECKSUM.start);
         let computed_checksum = compute_checksum(bytes);
         if stored_checksum != computed_checksum {
             return Err(Error::BadChecksum {
@@ -72,28 +74,28 @@ impl DynamicHeader {
             });
         }
 
-        let data_offset = read_u64(bytes, 8);
-        let table_offset = read_u64(bytes, 16);
-        let header_version = read_u32(bytes, 24);
-        let max_table_entries = read_u32(bytes, 28);
-        let block_size = read_u32(bytes, 32);
+        let data_offset = read_u64(bytes, at::DATA_OFFSET);
+        let table_offset = read_u64(bytes, at::TABLE_OFFSET);
+        let header_version = read_u32(bytes, at::HEADER_VERSION);
+        let max_table_entries = read_u32(bytes, at::MAX_TABLE_ENTRIES);
+        let block_size = read_u32(bytes, at::BLOCK_SIZE);
 
         if !block_size.is_power_of_two() {
             return Err(Error::Corrupt("block_size is not a power of two"));
         }
-        if block_size < 512 {
+        if (block_size as u64) < SECTOR_SIZE {
             return Err(Error::Corrupt("block_size < 512"));
         }
 
         let mut parent_unique_id = [0u8; 16];
-        parent_unique_id.copy_from_slice(&bytes[40..56]);
-        let parent_timestamp = read_u32(bytes, 56);
+        parent_unique_id.copy_from_slice(&bytes[at::PARENT_UNIQUE_ID]);
+        let parent_timestamp = read_u32(bytes, at::PARENT_TIMESTAMP);
 
-        let parent_name = decode_utf16_be(&bytes[64..64 + 512]);
+        let parent_name = decode_utf16_be(&bytes[at::PARENT_UNICODE_NAME]);
 
-        let mut parent_locators = [ParentLocator::default(); 8];
+        let mut parent_locators = [ParentLocator::default(); at::PARENT_LOCATOR_COUNT];
         for (i, slot) in parent_locators.iter_mut().enumerate() {
-            let off = 576 + i * 24;
+            let off = at::PARENT_LOCATORS + i * at::PARENT_LOCATOR_STRIDE;
             slot.platform_code.copy_from_slice(&bytes[off..off + 4]);
             slot.platform_data_space = read_u32(bytes, off + 4);
             slot.platform_data_length = read_u32(bytes, off + 8);
@@ -118,25 +120,18 @@ impl DynamicHeader {
     /// 512-byte sectors and the typical 2-MiB block size: 4096
     /// sectors / block → 4096 / 8 = 512 bytes = 1 sector.
     pub fn bitmap_size_bytes(&self) -> u64 {
-        let sectors = self.block_size as u64 / 512;
+        let sectors = self.block_size as u64 / SECTOR_SIZE;
         let bits = sectors;
         let bytes = bits.div_ceil(8);
         // Round up to a 512-byte sector.
-        bytes.div_ceil(512) * 512
+        bytes.div_ceil(SECTOR_SIZE) * SECTOR_SIZE
     }
 }
 
 /// One's complement of the u32 sum, with the checksum field (36..40)
 /// zeroed during compute. Same algorithm as the footer.
 pub fn compute_checksum(header_bytes: &[u8]) -> u32 {
-    let mut sum: u32 = 0;
-    for (i, b) in header_bytes.iter().enumerate().take(DYN_HEADER_SIZE) {
-        if (36..40).contains(&i) {
-            continue;
-        }
-        sum = sum.wrapping_add(*b as u32);
-    }
-    !sum
+    ones_complement_checksum(header_bytes, DYN_HEADER_SIZE, at::CHECKSUM)
 }
 
 fn decode_utf16_be(bytes: &[u8]) -> String {
@@ -149,23 +144,6 @@ fn decode_utf16_be(bytes: &[u8]) -> String {
         units.push(u);
     }
     String::from_utf16(&units).unwrap_or_default()
-}
-
-fn read_u32(b: &[u8], off: usize) -> u32 {
-    u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
-}
-
-fn read_u64(b: &[u8], off: usize) -> u64 {
-    u64::from_be_bytes([
-        b[off],
-        b[off + 1],
-        b[off + 2],
-        b[off + 3],
-        b[off + 4],
-        b[off + 5],
-        b[off + 6],
-        b[off + 7],
-    ])
 }
 
 #[cfg(test)]

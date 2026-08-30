@@ -5,9 +5,20 @@
 //! time crate.
 
 use crate::footer::{compute_checksum, FOOTER_COOKIE, FOOTER_SIZE};
+use crate::format::footer_offsets as at;
+use crate::format::{chs, disk_type_wire, SECTOR_SIZE};
 
-/// Disk type byte for fixed VHDs (per spec).
-const DISK_TYPE_FIXED: u32 = 2;
+/// Write a big-endian `u32` at `off`. The mirror of
+/// [`crate::format::read_u32`]; the builder and the parser now index
+/// the same constants, so a field can only move in both at once.
+fn write_u32(f: &mut [u8], off: usize, v: u32) {
+    f[off..off + 4].copy_from_slice(&v.to_be_bytes());
+}
+
+/// Write a big-endian `u64` at `off`. See [`write_u32`].
+fn write_u64(f: &mut [u8], off: usize, v: u64) {
+    f[off..off + 8].copy_from_slice(&v.to_be_bytes());
+}
 
 /// VHD epoch is 2000-01-01 00:00:00 UTC. Unix epoch + 30 years.
 const VHD_EPOCH_UNIX_SECS: u64 = 946_684_800;
@@ -38,38 +49,38 @@ pub fn build_fixed_footer(virtual_size_bytes: u64) -> [u8; FOOTER_SIZE] {
     let mut f = [0u8; FOOTER_SIZE];
 
     // Cookie.
-    f[0..8].copy_from_slice(FOOTER_COOKIE);
+    f[at::COOKIE].copy_from_slice(FOOTER_COOKIE);
     // Features: bit 1 ("reserved" — must be set per spec).
-    f[8..12].copy_from_slice(&0x0000_0002u32.to_be_bytes());
+    write_u32(&mut f, at::FEATURES, 0x0000_0002);
     // File format version 1.0.
-    f[12..16].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    write_u32(&mut f, at::FILE_FORMAT_VERSION, 0x0001_0000);
     // Data offset: 0xFFFF... for fixed (no dynamic header).
-    f[16..24].copy_from_slice(&u64::MAX.to_be_bytes());
+    write_u64(&mut f, at::DATA_OFFSET, u64::MAX);
     // Timestamp: seconds since VHD epoch (2000-01-01 UTC).
-    f[24..28].copy_from_slice(&vhd_timestamp_now().to_be_bytes());
+    write_u32(&mut f, at::TIMESTAMP, vhd_timestamp_now());
     // Creator app, version, host OS.
-    f[28..32].copy_from_slice(&CREATOR_APP);
-    f[32..36].copy_from_slice(&CREATOR_VERSION.to_be_bytes());
-    f[36..40].copy_from_slice(&CREATOR_HOST_OS.to_be_bytes());
+    f[at::CREATOR_APPLICATION..at::CREATOR_APPLICATION + 4].copy_from_slice(&CREATOR_APP);
+    write_u32(&mut f, at::CREATOR_VERSION, CREATOR_VERSION);
+    write_u32(&mut f, at::CREATOR_HOST_OS, CREATOR_HOST_OS);
     // Original + current size.
-    f[40..48].copy_from_slice(&virtual_size_bytes.to_be_bytes());
-    f[48..56].copy_from_slice(&virtual_size_bytes.to_be_bytes());
+    write_u64(&mut f, at::ORIGINAL_SIZE, virtual_size_bytes);
+    write_u64(&mut f, at::CURRENT_SIZE, virtual_size_bytes);
     // Disk geometry: u16 cyls + u8 heads + u8 spt.
     let (cyls, heads, spt) = chs_for_size(virtual_size_bytes);
-    f[56..58].copy_from_slice(&cyls.to_be_bytes());
-    f[58] = heads;
-    f[59] = spt;
+    f[at::DISK_GEOMETRY..at::DISK_GEOMETRY + 2].copy_from_slice(&cyls.to_be_bytes());
+    f[at::DISK_GEOMETRY + 2] = heads;
+    f[at::DISK_GEOMETRY + 3] = spt;
     // Disk type.
-    f[60..64].copy_from_slice(&DISK_TYPE_FIXED.to_be_bytes());
+    write_u32(&mut f, at::DISK_TYPE, disk_type_wire::FIXED);
     // Checksum is computed last with bytes 64..68 zeroed.
     // Unique ID (v4 UUID, 16 bytes).
     let uuid = generate_uuid_v4();
-    f[68..84].copy_from_slice(&uuid);
+    f[at::UNIQUE_ID].copy_from_slice(&uuid);
     // Saved state = 0 (already zero).
     // Reserved 427 bytes already zero.
 
     let cs = compute_checksum(&f);
-    f[64..68].copy_from_slice(&cs.to_be_bytes());
+    write_u32(&mut f, at::CHECKSUM.start, cs);
     f
 }
 
@@ -112,44 +123,40 @@ fn vhd_timestamp_now() -> u32 {
 /// count is exact, the geometry is an approximation, and a reader that
 /// derives one from the other will be off by up to a track.
 ///
-/// Sizes above the `65535 * 16 * 255` sector ceiling clamp to it, so
-/// the returned tuple always fits the footer's `u16`/`u8`/`u8` fields.
+/// Sizes above [`chs::MAX_ADDRESSABLE_SECTORS`] clamp to it, so the
+/// returned tuple always fits the footer's `u16`/`u8`/`u8` fields.
 ///
 /// Public because the geometry tests validate it directly against
 /// geometries produced by an independent VHD implementation — see
 /// `tests/reference_geometry.rs`.
 pub fn chs_for_size(size_bytes: u64) -> (u16, u8, u8) {
-    // VHD spec uses 512-byte sectors throughout.
-    let mut total_sectors = size_bytes / 512;
-    if total_sectors > 65535u64 * 16 * 255 {
-        total_sectors = 65535u64 * 16 * 255;
-    }
+    let total_sectors = (size_bytes / SECTOR_SIZE).min(chs::MAX_ADDRESSABLE_SECTORS);
 
-    let (cylinders_times_heads, heads, sectors_per_track) = if total_sectors >= 65535 * 16 * 63 {
-        // Maxed out.
-        let spt: u32 = 255;
-        let cth = total_sectors / spt as u64;
-        let heads: u32 = 16;
-        (cth, heads, spt)
-    } else {
-        let mut spt: u32 = 17;
-        let mut cth = total_sectors / spt as u64;
-        let mut heads: u32 = cth.div_ceil(1024) as u32;
-        if heads < 4 {
-            heads = 4;
-        }
-        if cth >= (heads as u64 * 1024) || heads > 16 {
-            spt = 31;
-            heads = 16;
-            cth = total_sectors / spt as u64;
-        }
-        if cth >= (heads as u64 * 1024) {
-            spt = 63;
-            heads = 16;
-            cth = total_sectors / spt as u64;
-        }
-        (cth, heads, spt)
-    };
+    let (cylinders_times_heads, heads, sectors_per_track) =
+        if total_sectors >= chs::LADDER_CEILING_SECTORS {
+            // Past the last rung: nothing smaller can describe the disk, so
+            // the geometry saturates.
+            let spt = chs::MAX_SECTORS_PER_TRACK;
+            (total_sectors / spt as u64, chs::MAX_HEADS, spt)
+        } else {
+            let mut spt = chs::SPT_FIRST;
+            let mut cth = total_sectors / spt as u64;
+            let mut heads = cth.div_ceil(chs::CYLINDERS_PER_HEAD_LIMIT) as u32;
+            if heads < chs::MIN_HEADS {
+                heads = chs::MIN_HEADS;
+            }
+            if cth >= (heads as u64 * chs::CYLINDERS_PER_HEAD_LIMIT) || heads > chs::MAX_HEADS {
+                spt = chs::SPT_SECOND;
+                heads = chs::MAX_HEADS;
+                cth = total_sectors / spt as u64;
+            }
+            if cth >= (heads as u64 * chs::CYLINDERS_PER_HEAD_LIMIT) {
+                spt = chs::SPT_THIRD;
+                heads = chs::MAX_HEADS;
+                cth = total_sectors / spt as u64;
+            }
+            (cth, heads, spt)
+        };
 
     let cylinders = if heads == 0 {
         0

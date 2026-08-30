@@ -27,6 +27,9 @@
 //! All multi-byte integers are big-endian.
 
 use crate::error::{Error, Result};
+use crate::format::disk_type_wire;
+use crate::format::footer_offsets as at;
+use crate::format::{ones_complement_checksum, read_u32, read_u64};
 
 pub const FOOTER_SIZE: usize = 512;
 pub const FOOTER_COOKIE: &[u8; 8] = b"conectix";
@@ -42,9 +45,9 @@ pub enum DiskType {
 impl DiskType {
     pub fn from_u32(v: u32) -> Result<Self> {
         match v {
-            2 => Ok(DiskType::Fixed),
-            3 => Ok(DiskType::Dynamic),
-            4 => Ok(DiskType::Differencing),
+            disk_type_wire::FIXED => Ok(DiskType::Fixed),
+            disk_type_wire::DYNAMIC => Ok(DiskType::Dynamic),
+            disk_type_wire::DIFFERENCING => Ok(DiskType::Differencing),
             other => Err(Error::UnsupportedDiskType(other)),
         }
     }
@@ -66,11 +69,11 @@ impl Footer {
         if bytes.len() < FOOTER_SIZE {
             return Err(Error::Corrupt("footer shorter than 512 bytes"));
         }
-        if &bytes[0..8] != FOOTER_COOKIE {
+        if &bytes[at::COOKIE] != FOOTER_COOKIE {
             return Err(Error::NotVhd);
         }
 
-        let stored_checksum = read_u32(bytes, 64);
+        let stored_checksum = read_u32(bytes, at::CHECKSUM.start);
         let computed_checksum = compute_checksum(bytes);
         if stored_checksum != computed_checksum {
             return Err(Error::BadChecksum {
@@ -80,15 +83,15 @@ impl Footer {
             });
         }
 
-        let features = read_u32(bytes, 8);
-        let file_format_version = read_u32(bytes, 12);
-        let data_offset = read_u64(bytes, 16);
-        let original_size = read_u64(bytes, 40);
-        let current_size = read_u64(bytes, 48);
-        let disk_type = DiskType::from_u32(read_u32(bytes, 60))?;
+        let features = read_u32(bytes, at::FEATURES);
+        let file_format_version = read_u32(bytes, at::FILE_FORMAT_VERSION);
+        let data_offset = read_u64(bytes, at::DATA_OFFSET);
+        let original_size = read_u64(bytes, at::ORIGINAL_SIZE);
+        let current_size = read_u64(bytes, at::CURRENT_SIZE);
+        let disk_type = DiskType::from_u32(read_u32(bytes, at::DISK_TYPE))?;
 
         let mut unique_id = [0u8; 16];
-        unique_id.copy_from_slice(&bytes[68..84]);
+        unique_id.copy_from_slice(&bytes[at::UNIQUE_ID]);
 
         Ok(Footer {
             features,
@@ -105,31 +108,7 @@ impl Footer {
 /// One's complement of the u32 sum of all bytes treated as u8, with the
 /// checksum field (bytes 64..68) zeroed during computation.
 pub fn compute_checksum(footer_bytes: &[u8]) -> u32 {
-    let mut sum: u32 = 0;
-    for (i, b) in footer_bytes.iter().enumerate().take(FOOTER_SIZE) {
-        if (64..68).contains(&i) {
-            continue;
-        }
-        sum = sum.wrapping_add(*b as u32);
-    }
-    !sum
-}
-
-fn read_u32(b: &[u8], off: usize) -> u32 {
-    u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
-}
-
-fn read_u64(b: &[u8], off: usize) -> u64 {
-    u64::from_be_bytes([
-        b[off],
-        b[off + 1],
-        b[off + 2],
-        b[off + 3],
-        b[off + 4],
-        b[off + 5],
-        b[off + 6],
-        b[off + 7],
-    ])
+    ones_complement_checksum(footer_bytes, FOOTER_SIZE, at::CHECKSUM)
 }
 
 #[cfg(test)]
