@@ -210,7 +210,7 @@ calls came out with it.
 
 ## Verification
 
-**62 tests pass, up from 56.** `chore lint` clean, including
+**61 tests pass, up from 56.** (Three added; one runtime test became a set of compile-time assertions, which no longer counts as a test but fails the build instead.) `chore lint` clean, including
 `--all-features`. Two behavioural changes across the whole sweep: an image whose
 BAT cannot fit in it is now refused at open, and a panicking synthetic test no
 longer leaves its fixture in the temp directory.
