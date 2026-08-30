@@ -979,3 +979,54 @@ fn fs_core_blockread_size_matches_virtual() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// A dynamic VHD whose `max_table_entries` is absurd is refused at open
+/// rather than used to size an allocation.
+///
+/// The field is a `u32` read straight off disk. Unbounded, it asks for
+/// up to 16 GiB — `vec![0u8; max_table_entries * 4]` — before a single
+/// byte of the BAT has been read, so a hostile image needs only a header
+/// to exhaust memory. The struct's own comment used to assert the table
+/// was "always small", which was a claim about a number nothing checked.
+///
+/// The bound is the image's own arithmetic: the table must fit inside
+/// the file it lives in.
+#[test]
+fn absurd_max_table_entries_is_refused_before_allocating() {
+    let path = tmp_path("absurd_bat");
+    build_dynamic_vhd(&path, &[0xABu8; 4096], 0xFF);
+    {
+        use std::io::Read;
+        // Rewrite max_table_entries (offset 28 of the dynamic header,
+        // which this fixture puts at sector 1) AND its checksum, so the
+        // header parses and the size bound is what rejects the image
+        // rather than the checksum.
+        let mut hdr = [0u8; DYN_HEADER_SIZE];
+        let mut rf = std::fs::File::open(&path).unwrap();
+        rf.seek(SeekFrom::Start(512)).unwrap();
+        rf.read_exact(&mut hdr).unwrap();
+
+        hdr[28..32].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        hdr[36..40].copy_from_slice(&0u32.to_be_bytes());
+        let cs = dyn_cs(&hdr);
+        hdr[36..40].copy_from_slice(&cs.to_be_bytes());
+
+        // Seek-then-write rather than a positional write: the
+        // positional syscalls live in `std::os::unix`, and CI runs this
+        // on Windows too.
+        let mut wf = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        wf.seek(SeekFrom::Start(512)).unwrap();
+        wf.write_all(&hdr).unwrap();
+    }
+
+    // `VhdReader` is not Debug, so `expect_err` is unavailable.
+    let msg = match VhdReader::open(&path) {
+        Ok(_) => panic!("a BAT larger than the image must be refused, not allocated"),
+        Err(e) => format!("{e}"),
+    };
+    assert!(
+        msg.contains("BAT"),
+        "the refusal should name the BAT, got: {msg}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
