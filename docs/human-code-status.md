@@ -89,15 +89,45 @@ the program may never have invoked**. The entry name is now threaded through.
 
 The 25-line duplication itself is left — see below.
 
-### M1, M2, M3, M4, M5 — duplication and unnamed wire values — **fixable, not yet done**
+### M3 — the sector-bitmap arithmetic, open-coded twice with opposite bounds discipline — **fixed**
+
+```rust
+// read side                                  // write side
+let bit_byte  = (n / 8) as usize;             let bit_byte  = (n / 8) as usize;
+let bit_in_byte = 7 - (n % 8) as u8;          let bit_in_byte = 7 - (n % 8) as u8;
+let bit_set = (bitmap[bit_byte] …             if bit_byte >= bitmap.len() {
+                                                  return Err(Error::Corrupt(…));
+                                              }
+```
+
+Both are safe, and the asymmetry reads as though one of them is a bug. Deciding
+which meant reconstructing the sizing argument from `dynamic.rs` — that
+`bitmap_size_bytes` is one bit per sector of the block rounded up to a whole
+sector, so a bitmap always covers every sector its block can hold.
+
+`bitmap_get` / `bitmap_set` state the ordering once and give the bounds question
+one answer. **Neither checks**, and the doc says why: an index past the end would
+mean a caller had asked about a sector outside the block, which is a bug here and
+not corrupt input. The old `Error::Corrupt("bitmap index out of range")` named the
+input as the fault, and the input has nothing to do with it.
+
+Panicking beats returning `false` for the same reason: a silent `false` reads as
+"this sector is a hole" and hands the caller zeroes for data that exists.
+
+`7 - (n % 8)` is the format's MSB-first ordering — sector 0 is bit 7 of byte 0 —
+and it is the one fact the two paths must agree on. **Getting it backwards is
+invisible to a round trip through this crate**, since writer and reader would
+agree with each other and disagree with every other VHD tool, so the test asserts
+against literal bytes rather than against itself. A third test checks the sizing
+invariant across four block sizes, which is the argument both helpers rest on.
+
+Mutation-checked: `7 - (n % 8)` written as `n % 8` fails two of the three.
+
+### M1, M2, M4, M5 — duplication and unnamed wire values — **fixable, not yet done**
 
 `read_u32`/`read_u64` byte-identical in two modules; `compute_checksum` twice
-with a different skip window; the sector-bitmap arithmetic open-coded twice
-*with opposite bounds discipline*; `SECTOR_SIZE` named in one module and
-open-coded in three; the disk-type wire values 2/3/4 in four places.
-
-M3 is the one to do first of these — two copies of the same arithmetic
-disagreeing about bounds checking is how one of them ends up wrong.
+with a different skip window; `SECTOR_SIZE` named in one module and open-coded in
+three; the disk-type wire values 2/3/4 in four places.
 
 ### M6, M7, M8, M12 — structure and naming — **needs your decision**
 
@@ -128,5 +158,5 @@ Test hygiene; a panicking assertion leaves a file behind in the third.
 
 ## Verification
 
-**56 tests pass, up from 55.** `chore lint` clean. The new test is the only
+**59 tests pass, up from 56.** `chore lint` clean. The new test is the only
 behavioural change: an image whose BAT cannot fit in it is now refused at open.
