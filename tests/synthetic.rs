@@ -993,8 +993,6 @@ fn fs_core_blockread_size_matches_virtual() {
 /// the file it lives in.
 #[test]
 fn absurd_max_table_entries_is_refused_before_allocating() {
-    use std::os::unix::fs::FileExt;
-
     let path = tmp_path("absurd_bat");
     build_dynamic_vhd(&path, &[0xABu8; 4096], 0xFF);
     {
@@ -1013,8 +1011,12 @@ fn absurd_max_table_entries_is_refused_before_allocating() {
         let cs = dyn_cs(&hdr);
         hdr[36..40].copy_from_slice(&cs.to_be_bytes());
 
-        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        f.write_all_at(&hdr, 512).unwrap();
+        // Seek-then-write rather than a positional write: the
+        // positional syscalls live in `std::os::unix`, and CI runs this
+        // on Windows too.
+        let mut wf = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        wf.seek(SeekFrom::Start(512)).unwrap();
+        wf.write_all(&hdr).unwrap();
     }
 
     // `VhdReader` is not Debug, so `expect_err` is unavailable.
