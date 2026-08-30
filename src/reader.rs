@@ -54,7 +54,12 @@ pub struct VhdReader {
     /// parsed dynamic header.
     dynamic: Option<DynamicHeader>,
     /// `None` for fixed disks. For dynamic/differencing, the cached
-    /// in-memory BAT (always small — `max_table_entries * 4` bytes).
+    /// in-memory BAT, `max_table_entries * 4` bytes.
+    ///
+    /// Bounded at open: the table must describe at least the declared
+    /// virtual size and must fit inside the image. Before that check the
+    /// comment here claimed it was "always small", which was an
+    /// assertion about a field read straight off disk.
     ///
     /// This is the write lock for sparse images, not merely a container
     /// lock, and [`VhdReader::write_sparse`] holds it across one whole
@@ -164,8 +169,42 @@ impl VhdReader {
                 let dyn_hdr = DynamicHeader::parse(&hdr_bytes)?;
 
                 // BAT.
+                //
+                // `max_table_entries` comes straight off disk. Bounding it
+                // before allocating is the whole point: it is a u32, so an
+                // unbounded read of it asks for up to 16 GiB on a hostile
+                // or corrupt image, before a single byte of the table has
+                // been read.
+                //
+                // Two bounds, and both are the image's own arithmetic
+                // rather than a number invented here. The table must
+                // describe at least the declared virtual size, and it
+                // cannot be larger than the file it lives in.
                 let bat_entries = dyn_hdr.max_table_entries as usize;
-                let mut bat_bytes = vec![0u8; bat_entries * 4];
+                let bat_bytes_len = (bat_entries as u64)
+                    .checked_mul(4)
+                    .ok_or(Error::Corrupt("BAT size overflows"))?;
+
+                let block_size = dyn_hdr.block_size as u64;
+                if block_size == 0 {
+                    return Err(Error::Corrupt("dynamic header declares block_size 0"));
+                }
+                let blocks_needed = virtual_size.div_ceil(block_size);
+                if (bat_entries as u64) < blocks_needed {
+                    return Err(Error::Corrupt(
+                        "BAT is too small to describe the declared virtual size",
+                    ));
+                }
+
+                let table_end = dyn_hdr
+                    .table_offset
+                    .checked_add(bat_bytes_len)
+                    .ok_or(Error::Corrupt("BAT extent overflows"))?;
+                if table_end > dev_size {
+                    return Err(Error::Corrupt("BAT extends past the end of the image"));
+                }
+
+                let mut bat_bytes = vec![0u8; bat_bytes_len as usize];
                 dev.read_at(dyn_hdr.table_offset, &mut bat_bytes)
                     .map_err(fs_core_to_vhd_error)?;
                 let mut bat = Vec::with_capacity(bat_entries);
@@ -753,9 +792,18 @@ impl VhdReader {
     }
 }
 
-/// Open the differencing parent VHD by walking the parent locators.
-/// Tries the W2ku/W2ru relative-path locators first, then falls back
-/// to a sibling lookup using `parent_unicode_name`.
+/// Open the differencing parent VHD.
+///
+/// # It does not walk the parent locators
+///
+/// The header's W2ku/W2ru locators are read and deliberately ignored:
+/// resolution is `parent_unicode_name` against the child's own
+/// directory, so a parent that is not a sibling is not found.
+///
+/// This comment said the opposite — locators first, sibling lookup as a
+/// fallback — while an inline comment a few lines down said what the
+/// code really does. Of two contradicting comments the reader meets
+/// this one first, and it described a function that does not exist.
 fn open_parent(
     child_path: &Path,
     dyn_hdr: &DynamicHeader,

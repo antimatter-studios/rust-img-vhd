@@ -20,7 +20,7 @@ use std::sync::Arc;
 /// Read-only — `fs_core_device_write_at` returns FS_CORE_READ_ONLY.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vhd_open(path: *const c_char) -> *mut FsCoreDevice {
-    open_path(path, false)
+    open_path(path, false, "vhd_open")
 }
 
 /// Open `path` (NUL-terminated UTF-8) read-write as a VHD image. Fixed
@@ -29,7 +29,7 @@ pub unsafe extern "C" fn vhd_open(path: *const c_char) -> *mut FsCoreDevice {
 /// returns `FS_CORE_READ_ONLY` until the differencing write path lands.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vhd_open_rw(path: *const c_char) -> *mut FsCoreDevice {
-    open_path(path, true)
+    open_path(path, true, "vhd_open_rw")
 }
 
 /// Create a fresh fixed-VHD at `path` of `virtual_size_bytes` bytes and
@@ -87,7 +87,7 @@ pub unsafe extern "C" fn vhd_create_fixed(
 /// a differencing image is rejected with `FS_CORE_CUSTOM`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vhd_open_on_device(inner: *mut FsCoreDevice) -> *mut FsCoreDevice {
-    unsafe { open_on_device(inner, false) }
+    unsafe { open_on_device(inner, false, "vhd_open_on_device") }
 }
 
 /// Read-write variant of [`vhd_open_on_device`]. The input device must
@@ -95,10 +95,19 @@ pub unsafe extern "C" fn vhd_open_on_device(inner: *mut FsCoreDevice) -> *mut Fs
 /// `FS_CORE_READ_ONLY` and the input is freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vhd_open_rw_on_device(inner: *mut FsCoreDevice) -> *mut FsCoreDevice {
-    unsafe { open_on_device(inner, true) }
+    unsafe { open_on_device(inner, true, "vhd_open_rw_on_device") }
 }
 
-unsafe fn open_on_device(inner: *mut FsCoreDevice, writable: bool) -> *mut FsCoreDevice {
+/// `entry` is the C name the caller actually used. Both
+/// `vhd_open_on_device` and `vhd_open_rw_on_device` land here, and the
+/// panic message used to name the read-only one whichever was called —
+/// so a crash report pointed at a function the program may never have
+/// invoked.
+unsafe fn open_on_device(
+    inner: *mut FsCoreDevice,
+    writable: bool,
+    entry: &str,
+) -> *mut FsCoreDevice {
     if inner.is_null() {
         set_last_error("inner device handle is null");
         return ptr::null_mut();
@@ -129,13 +138,15 @@ unsafe fn open_on_device(inner: *mut FsCoreDevice, writable: bool) -> *mut FsCor
     match res {
         Ok(p) => p,
         Err(_) => {
-            set_last_error("panic in vhd_open_on_device");
+            set_last_error(format!("panic in {entry}"));
             ptr::null_mut()
         }
     }
 }
 
-fn open_path(path: *const c_char, writable: bool) -> *mut FsCoreDevice {
+/// `entry` is the C name the caller actually used — see
+/// [`open_on_device`] for why it is threaded through.
+fn open_path(path: *const c_char, writable: bool, entry: &str) -> *mut FsCoreDevice {
     if path.is_null() {
         set_last_error("path is null");
         return ptr::null_mut();
@@ -165,7 +176,7 @@ fn open_path(path: *const c_char, writable: bool) -> *mut FsCoreDevice {
     match res {
         Ok(p) => p,
         Err(_) => {
-            set_last_error("panic in vhd_open");
+            set_last_error(format!("panic in {entry}"));
             ptr::null_mut()
         }
     }
