@@ -430,6 +430,55 @@ impl VhdReader {
         self.dev.flush().map_err(fs_core_to_vhd_error)
     }
 
+    /// Is the sector at `sector_in_block` present in this image?
+    ///
+    /// # The bit order is the format's, not an arbitrary choice
+    ///
+    /// A block's bitmap is **MSB-first**: sector 0 is bit 7 of byte 0,
+    /// sector 7 is bit 0 of byte 0, sector 8 is bit 7 of byte 1. That
+    /// is what `7 - (n % 8)` says, and it is the single fact the read
+    /// and write paths have to agree on — they were open-coding it
+    /// separately, with different bounds discipline, which reads like
+    /// one of them is wrong.
+    ///
+    /// # Why there is no bounds check
+    ///
+    /// [`DynamicHeader::bitmap_size_bytes`] derives the bitmap from
+    /// `block_size`: one bit per sector, rounded up to a whole sector.
+    /// So a bitmap always covers every sector its block can hold, and
+    /// an index past the end would mean a caller had asked about a
+    /// sector outside the block — a bug here, not corrupt input.
+    ///
+    /// # Panics
+    ///
+    /// If `sector_in_block` is outside the block, which the above says
+    /// cannot happen. Panicking beats returning `false`: a silent
+    /// `false` reads as "this sector is a hole" and hands the caller
+    /// zeroes for data that exists.
+    fn bitmap_get(bitmap: &[u8], sector_in_block: u64) -> bool {
+        let byte = (sector_in_block / 8) as usize;
+        let bit = 7 - (sector_in_block % 8) as u8;
+        (bitmap[byte] >> bit) & 1 == 1
+    }
+
+    /// Mark the sector at `sector_in_block` present.
+    ///
+    /// Same MSB-first ordering, same sizing argument, as
+    /// [`Self::bitmap_get`].
+    ///
+    /// # Panics
+    ///
+    /// If `sector_in_block` is outside the block. The write path used
+    /// to return `Error::Corrupt("bitmap index out of range")` here,
+    /// which named the input as the fault; the input has nothing to do
+    /// with it, since the bitmap's size comes from the block size and
+    /// the sector comes from a caller's offset.
+    fn bitmap_set(bitmap: &mut [u8], sector_in_block: u64) {
+        let byte = (sector_in_block / 8) as usize;
+        let bit = 7 - (sector_in_block % 8) as u8;
+        bitmap[byte] |= 1 << bit;
+    }
+
     fn read_sparse(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         let dyn_hdr = self
             .dynamic
@@ -488,9 +537,7 @@ impl VhdReader {
                 let bytes_left_in_sector = SECTOR_SIZE - in_sector;
                 let slice_len =
                     std::cmp::min(bytes_left_in_sector, block_end - block_cursor) as usize;
-                let bit_byte = (sector_in_block / 8) as usize;
-                let bit_in_byte = 7 - (sector_in_block % 8) as u8;
-                let bit_set = (bitmap[bit_byte] >> bit_in_byte) & 1 == 1;
+                let bit_set = Self::bitmap_get(&bitmap, sector_in_block);
 
                 let dst = &mut buf[written..written + slice_len];
                 if bit_set {
@@ -779,12 +826,7 @@ impl VhdReader {
         let last_sector_inclusive = (last_byte - 1) / SECTOR_SIZE;
 
         for sector in first_sector..=last_sector_inclusive {
-            let bit_byte = (sector / 8) as usize;
-            let bit_in_byte = 7 - (sector % 8) as u8;
-            if bit_byte >= bitmap.len() {
-                return Err(Error::Corrupt("bitmap index out of range"));
-            }
-            bitmap[bit_byte] |= 1 << bit_in_byte;
+            Self::bitmap_set(&mut bitmap, sector);
         }
 
         self.dev_write(block_host_off, &bitmap)?;
@@ -900,5 +942,93 @@ fn fs_core_to_vhd_error(e: fs_core::Error) -> Error {
             Error::OutOfBounds { offset, len, size }
         }
         fs_core::Error::Custom(s) => Error::Custom(s),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dynamic::DynamicHeader;
+
+    /// Sector 0 is the **top** bit of byte 0.
+    ///
+    /// The ordering is the format's and it is the one fact the read and
+    /// write paths must agree on. Getting it backwards is invisible to
+    /// a round trip through this crate — writer and reader would agree
+    /// with each other and disagree with every other VHD tool — so it
+    /// is asserted against literal bytes rather than against itself.
+    #[test]
+    fn the_bitmap_is_most_significant_bit_first() {
+        let bitmap = [0b1000_0000u8, 0b0000_0001];
+        assert!(
+            VhdReader::bitmap_get(&bitmap, 0),
+            "sector 0 is bit 7 of byte 0"
+        );
+        assert!(!VhdReader::bitmap_get(&bitmap, 1));
+        assert!(!VhdReader::bitmap_get(&bitmap, 7));
+        assert!(!VhdReader::bitmap_get(&bitmap, 8));
+        assert!(
+            VhdReader::bitmap_get(&bitmap, 15),
+            "sector 15 is bit 0 of byte 1"
+        );
+    }
+
+    /// Setting a sector makes it present, and disturbs nothing else.
+    #[test]
+    fn setting_a_sector_touches_only_that_sector() {
+        let mut bitmap = [0u8; 2];
+        VhdReader::bitmap_set(&mut bitmap, 3);
+        assert_eq!(bitmap, [0b0001_0000, 0]);
+        assert!(VhdReader::bitmap_get(&bitmap, 3));
+
+        VhdReader::bitmap_set(&mut bitmap, 9);
+        assert_eq!(bitmap, [0b0001_0000, 0b0100_0000]);
+
+        // Idempotent — the write path marks ranges that may overlap
+        // sectors already present.
+        VhdReader::bitmap_set(&mut bitmap, 3);
+        assert_eq!(bitmap, [0b0001_0000, 0b0100_0000]);
+
+        for sector in 0..16u64 {
+            assert_eq!(
+                VhdReader::bitmap_get(&bitmap, sector),
+                sector == 3 || sector == 9,
+                "sector {sector}"
+            );
+        }
+    }
+
+    /// The invariant that lets both helpers index without checking.
+    ///
+    /// `bitmap_size_bytes` gives one bit per sector of the block,
+    /// rounded up to a whole sector — so the last sector of any block
+    /// always has a bit inside the bitmap, with room to spare. That is
+    /// the argument the read side used to leave unstated and the write
+    /// side used to guard against with an `Error::Corrupt`; it belongs
+    /// here, where it can be checked.
+    #[test]
+    fn a_bitmap_always_covers_every_sector_of_its_block() {
+        for block_size in [512u32, 4096, 0x0020_0000, 0x0080_0000] {
+            let header = DynamicHeader {
+                data_offset: 0,
+                table_offset: 0,
+                header_version: 0x0001_0000,
+                max_table_entries: 1,
+                block_size,
+                parent_unique_id: [0; 16],
+                parent_timestamp: 0,
+                parent_name: String::new(),
+                parent_locators: Default::default(),
+            };
+            let bitmap_bytes = header.bitmap_size_bytes();
+            let sectors = u64::from(block_size) / SECTOR_SIZE;
+            let last_byte_index = (sectors - 1) / 8;
+            assert!(
+                last_byte_index < bitmap_bytes,
+                "block size {block_size}: last sector {} needs byte {last_byte_index}, \
+                 bitmap is {bitmap_bytes} bytes",
+                sectors - 1
+            );
+        }
     }
 }
