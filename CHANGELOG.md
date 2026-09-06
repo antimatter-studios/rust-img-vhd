@@ -7,6 +7,15 @@ never does.
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-09-06
+
+### Fixed
+
+- A new block is initialised in chunks rather than in one buffer. A
+  dynamic VHD's block size comes from the footer, so allocating a
+  buffer of that size to zero it is the image deciding how much memory
+  this crate spends.
+
 ## [0.3.4] — 2026-09-04
 
 ### Changed
