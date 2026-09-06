@@ -764,8 +764,26 @@ impl VhdReader {
         // FileDevice's write_at extends the file as needed; on
         // non-growable BlockDevice impls this surfaces an I/O error
         // up to the caller, which is the right behaviour.
-        let zeros = vec![0u8; block_total as usize];
-        self.dev_write(new_block_off, &zeros)?;
+        // IN CHUNKS, not in one buffer the size of a block.
+        //
+        // `block_size` comes from the dynamic header, which is checked
+        // for being a power of two and at least a sector and has no
+        // upper bound -- neither does either BAT bound, because a
+        // larger block makes the table SMALLER. So 0x8000_0000 asks for
+        // a 2 GiB buffer here before writing anything.
+        //
+        // A megabyte is small enough that a pathological block size
+        // costs time rather than memory, and large enough that the loop
+        // is not the cost. The bitmap plus data area is written whole
+        // either way; only the buffer is bounded.
+        const ZERO_CHUNK: usize = 1024 * 1024;
+        let zeros = vec![0u8; ZERO_CHUNK.min(block_total as usize)];
+        let mut written = 0u64;
+        while written < block_total {
+            let n = (block_total - written).min(zeros.len() as u64) as usize;
+            self.dev_write(new_block_off + written, &zeros[..n])?;
+            written += n as u64;
+        }
         self.dev_flush()?;
 
         // Commit the tail before step 2 is even issued. The instant
