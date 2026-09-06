@@ -65,8 +65,11 @@ pub unsafe extern "C" fn vhd_create_fixed(
     }));
     match res {
         Ok(p) => p,
-        Err(_) => {
-            set_last_error("panic in vhd_create_fixed");
+        Err(panic) => {
+            set_last_error(format!(
+                "panic in vhd_create_fixed: {}",
+                fs_core::ffi::panic_message(&panic)
+            ));
             ptr::null_mut()
         }
     }
@@ -137,8 +140,11 @@ unsafe fn open_on_device(
     }));
     match res {
         Ok(p) => p,
-        Err(_) => {
-            set_last_error(format!("panic in {entry}"));
+        Err(panic) => {
+            set_last_error(format!(
+                "panic in {entry}: {}",
+                fs_core::ffi::panic_message(&panic)
+            ));
             ptr::null_mut()
         }
     }
@@ -175,9 +181,36 @@ fn open_path(path: *const c_char, writable: bool, entry: &str) -> *mut FsCoreDev
     }));
     match res {
         Ok(p) => p,
-        Err(_) => {
-            set_last_error(format!("panic in {entry}"));
+        Err(panic) => {
+            set_last_error(format!(
+                "panic in {entry}: {}",
+                fs_core::ffi::panic_message(&panic)
+            ));
             ptr::null_mut()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A PANIC SAYS WHAT IT SAID.
+    ///
+    /// These guards used to report `"panic in <function>"` — the name of
+    /// the function that was running, which the caller already knew, in
+    /// place of the message, which is the only part it did not. A C
+    /// caller reading `vhd_last_error` got a sentence with no
+    /// information in it.
+    #[test]
+    fn a_panic_reaches_the_caller_with_its_message() {
+        let caught =
+            std::panic::catch_unwind(|| panic!("the bytes ran out")).expect_err("it panicked");
+        let reported = format!(
+            "panic in vhd_open: {}",
+            fs_core::ffi::panic_message(&caught)
+        );
+        assert!(
+            reported.contains("the bytes ran out"),
+            "the panic's own words have to survive the boundary: {reported}"
+        );
     }
 }
