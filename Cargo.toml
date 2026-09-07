@@ -25,7 +25,7 @@ qemu-validation = []
 
 [dependencies]
 # Block-device trait surface — `Qcow2Reader`-style integration.
-am-fs-core = { path = "../rust-fs-core", version = "0.2.6" }
+am-fs-core = { path = "../rust-fs-core", version = "0.2.10" }
 
 [dev-dependencies]
 # JSON parsing for `qemu-img info --output=json` in the qemu-validation

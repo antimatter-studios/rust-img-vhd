@@ -990,3 +990,146 @@ fn absurd_max_table_entries_is_refused_before_allocating() {
         "the refusal should name the BAT, got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------
+// A BAT entry is a sector index chosen by the image, and the address it
+// names has to be one a block can legitimately occupy.
+//
+// `build_dynamic_vhd`'s layout, for the numbers below: footer mirror at
+// 0, dynamic header at 512 (1024 bytes), BAT at sector 3 (1536), block 0
+// bitmap at sector 5 (2560), block 0 data at 3072, trailing footer at
+// 7168. So the first byte a block may occupy is 2048.
+// ---------------------------------------------------------------------
+
+const FIXTURE_BAT_OFFSET: u64 = 512 * 3;
+
+/// Overwrite bytes in an image that already exists.
+fn patch(path: &Path, off: u64, bytes: &[u8]) {
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    f.write_all_at(bytes, off).unwrap();
+}
+
+/// Build the standard dynamic fixture with BAT entry 0 replaced.
+fn dynamic_with_bat0(name: &str, entry: u32) -> TempPath {
+    let path = tmp_path(name);
+    let block: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+    build_dynamic_vhd(&path, &block, 0xFF);
+    patch(&path, FIXTURE_BAT_OFFSET, &entry.to_be_bytes());
+    path
+}
+
+#[test]
+fn a_bat_entry_pointing_into_the_metadata_is_refused_at_open() {
+    // Entry 0 makes the footer mirror the block's sector bitmap and the
+    // bytes after it the block's data.
+    let path = dynamic_with_bat0("bat_zero", 0);
+    let err = VhdReader::open(&path)
+        .err()
+        .expect("an image whose BAT points at its own footer must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}
+
+#[test]
+fn a_bat_entry_landing_on_the_last_metadata_sector_is_refused_at_open() {
+    // Sector 3 is the BAT itself — one sector below the first address a
+    // block may occupy, so this pins the boundary rather than just the
+    // obviously-absurd zero.
+    let path = dynamic_with_bat0("bat_on_table", 3);
+    let err = VhdReader::open(&path)
+        .err()
+        .expect("an image whose BAT points at the BAT must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}
+
+#[test]
+fn a_bat_entry_at_the_first_legal_sector_is_accepted() {
+    // Sector 4 is `align_up(BAT end, 512)` — the first byte a block may
+    // occupy. The pair with the test above is the point: a bound wants
+    // the last value it must refuse and the first it must accept, or a
+    // bound one sector too strict passes just as quietly as one a sector
+    // too loose.
+    let path = dynamic_with_bat0("bat_first_legal", 4);
+    VhdReader::open(&path).expect("a block at the first legal sector must open");
+}
+
+#[test]
+fn a_bat_entry_past_the_end_of_the_image_is_refused_at_open() {
+    let path = dynamic_with_bat0("bat_past_end", 0x00FF_FFFF);
+    let err = VhdReader::open(&path)
+        .err()
+        .expect("an image whose BAT points past its own end must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}
+
+#[test]
+fn a_bat_entry_whose_block_reaches_the_trailing_footer_is_refused_at_open() {
+    // The data area ends where the trailing footer begins, not at the
+    // end of the file. Entry 6 puts the block at 3072, so it ends at
+    // 3072 + 4608 == 7680, which is exactly `dev_size` — and its last
+    // sector IS the footer. Measured against a bound of `dev_size`,
+    // which is what this was before: the image opened, and reading
+    // virtual sector 7 of block 0 returned
+    //
+    //     Ok(())  buf=[63, 6f, 6e, 65, 63, 74, 69, 78, ...]  "conectix"
+    //
+    // the VHD footer cookie, as the guest's file data. That is the
+    // defect this walk exists to stop, arriving through the check meant
+    // to stop it.
+    let path = dynamic_with_bat0("bat_over_footer", 6);
+    let err = VhdReader::open(&path)
+        .err()
+        .expect("a block whose last sector is the trailing footer must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}
+
+#[test]
+fn a_bat_entry_whose_block_ends_exactly_at_the_footer_is_accepted() {
+    // Sector 5 is where `build_dynamic_vhd` really puts block 0:
+    // 2560 + 4608 == 7168 == dev_size - 512, so the block ends exactly
+    // where the footer begins. This is the last value the bound must
+    // accept, and tightening it by one footer too many — the obvious way
+    // to overshoot the correction above — would reject the last
+    // legitimate block of every canonical image.
+    let path = dynamic_with_bat0("bat_last_legal", 5);
+    let r = VhdReader::open(&path).expect("a block ending at the footer must open");
+    let mut buf = vec![0u8; 4096];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(
+        buf,
+        (0u8..=255u8).cycle().take(4096).collect::<Vec<u8>>(),
+        "and it must still read"
+    );
+}
+
+#[test]
+fn two_bat_entries_naming_one_block_are_refused_at_open() {
+    // Entry 1 is normally unallocated; pointing it at block 0 makes two
+    // virtual blocks share one host block, so a write through either
+    // silently changes the other.
+    let path = tmp_path("bat_aliased");
+    let block: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+    build_dynamic_vhd(&path, &block, 0xFF);
+    patch(&path, FIXTURE_BAT_OFFSET + 4, &5u32.to_be_bytes());
+
+    let err = VhdReader::open(&path)
+        .err()
+        .expect("an image with two BAT entries at one address must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}
+
+#[test]
+fn the_unmodified_fixture_still_opens_and_reads() {
+    // The positive control for the four refusals above: the same
+    // builder, untouched, must keep working.
+    let path = tmp_path("bat_ok");
+    let block: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+    build_dynamic_vhd(&path, &block, 0xFF);
+    let r = VhdReader::open(&path).unwrap();
+    let mut buf = vec![0u8; 4096];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, block);
+}
