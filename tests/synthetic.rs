@@ -1193,3 +1193,83 @@ fn an_aligned_sparse_image_still_allocates_and_reads_back() {
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf, payload);
 }
+
+/// A partial-sector write into a block somebody else allocated must not
+/// publish the rest of the sector.
+///
+/// The fixture is the case the format allows and this crate did not
+/// handle: block 0 is allocated, its bitmap is all clear — so every
+/// sector reads as zero — and its data area holds `0xEE`, because the
+/// format leaves the bytes under a clear bit undefined and a writer is
+/// free to leave anything there.
+#[test]
+fn a_partial_sector_write_publishes_only_what_was_written() {
+    let path = tmp_path("partial_sector");
+    build_dynamic_vhd(&path, &[0xEEu8; 4096], 0x00);
+
+    // Before anything is written, the block reads as zeros.
+    {
+        let r = VhdReader::open(&path).unwrap();
+        let mut buf = vec![0u8; 512];
+        r.read_at(0, &mut buf).unwrap();
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "an all-clear bitmap must read as zeros, got {:02x?}",
+            &buf[..8]
+        );
+    }
+
+    {
+        let r = VhdReader::open_rw(&path).unwrap();
+        r.write_at(100, &[0xABu8; 16]).unwrap();
+        r.flush_writes().unwrap();
+    }
+
+    let r = VhdReader::open(&path).unwrap();
+    let mut buf = vec![0u8; 512];
+    r.read_at(0, &mut buf).unwrap();
+
+    assert_eq!(&buf[100..116], &[0xABu8; 16], "the payload did not land");
+    let stray: Vec<usize> = (0..512)
+        .filter(|&i| !(100..116).contains(&i) && buf[i] != 0)
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "{} bytes the caller never wrote were published; first at {:?}",
+        stray.len(),
+        &stray[..stray.len().min(8)]
+    );
+}
+
+/// A write that starts mid-sector and ends mid-sector two sectors later
+/// leaves both partial ends undefined-free, and does not disturb the
+/// sector between them, which the payload covers in full.
+#[test]
+fn a_write_spanning_three_sectors_publishes_only_what_was_written() {
+    let path = tmp_path("partial_span");
+    build_dynamic_vhd(&path, &[0xEEu8; 4096], 0x00);
+
+    let start = 512 + 300u64; // mid-sector 1
+    let len = 512 + 400usize; // through sector 2, ending mid-sector 3
+    {
+        let r = VhdReader::open_rw(&path).unwrap();
+        r.write_at(start, &vec![0xCDu8; len]).unwrap();
+        r.flush_writes().unwrap();
+    }
+
+    let r = VhdReader::open(&path).unwrap();
+    let mut buf = vec![0u8; 4 * 512];
+    r.read_at(0, &mut buf).unwrap();
+
+    let s = start as usize;
+    assert_eq!(&buf[s..s + len], &vec![0xCDu8; len][..]);
+    let stray: Vec<usize> = (0..buf.len())
+        .filter(|&i| !(s..s + len).contains(&i) && buf[i] != 0)
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "{} bytes the caller never wrote were published; first at {:?}",
+        stray.len(),
+        &stray[..stray.len().min(8)]
+    );
+}
