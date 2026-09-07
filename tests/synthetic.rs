@@ -1498,9 +1498,15 @@ fn an_absolute_parent_name_is_refused_though_the_file_is_there() {
     // its full path.
     let child = tmp_path("escape_absolute_child");
     let absolute = parent.to_string_lossy().into_owned();
+    // Asked of the path rather than of its first character: on Windows
+    // an absolute path starts with a drive letter, and `starts_with('/')`
+    // is a Unix-shaped assumption that failed there while the behaviour
+    // under test was fine. What the assertion is for is that the
+    // fixture really is naming an absolute path, so the refusal below
+    // is about being one.
     assert!(
-        absolute.starts_with('/'),
-        "the fixture's path is not absolute, so this test proves nothing"
+        Path::new(&absolute).is_absolute(),
+        "the fixture's path is not absolute, so this test proves nothing: {absolute}"
     );
     build_differencing_vhd_named(&child, &absolute, [0x22u8; 16]);
 
