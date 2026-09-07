@@ -1122,17 +1122,16 @@ fn open_parent(
     // Locator-data resolution can land in a follow-up.
     let _ = dyn_hdr.parent_locators; // explicitly acknowledged
 
-    let parent_name = &dyn_hdr.parent_name;
-    if parent_name.is_empty() {
-        return Err(Error::ParentNotFound(
-            "differencing VHD has empty parent name".into(),
-        ));
-    }
+    let parent_name = parent_file_name(&dyn_hdr.parent_name)?;
 
-    // Try `<child_dir>/<parent_name>` first.
+    // `<child_dir>/<parent_name>`, and nowhere else.
+    //
+    // An empty parent component means the child was named without a
+    // directory at all, so its siblings are in the working directory by
+    // the same token the child was found there.
     let candidate: PathBuf = match child_path.parent() {
-        Some(p) => p.join(parent_name),
-        None => PathBuf::from(parent_name),
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(parent_name),
+        _ => PathBuf::from(parent_name),
     };
 
     if candidate.exists() {
@@ -1142,20 +1141,66 @@ fn open_parent(
         return check_parent_identity(parent, dyn_hdr);
     }
 
-    // Plain `parent_name` as last resort.
-    let direct = PathBuf::from(parent_name);
-    if direct.exists() {
-        let dev = FileDevice::open(&direct).map_err(fs_core_to_vhd_error)?;
-        let parent =
-            VhdReader::open_inner(Arc::new(dev), false, depth_remaining - 1, Some(direct))?;
-        return check_parent_identity(parent, dyn_hdr);
-    }
-
     Err(Error::ParentNotFound(format!(
-        "tried '{}' and '{}'",
-        candidate.display(),
-        direct.display()
+        "no '{parent_name}' beside the child, at '{}'",
+        candidate.display()
     )))
+}
+
+/// The parent's file name, or why this image's is not one.
+///
+/// `parent_unicode_name` is 512 bytes of UTF-16 chosen by whoever wrote
+/// the image, and it used to be joined onto the child's directory and
+/// used as it stood. Two ways out of that directory, and a third out of
+/// the file system the child is on:
+///
+/// * `Path::join` with an absolute path **replaces** the base rather
+///   than extending it, so a name of `/etc/shadow` was that exact path
+///   and not a sibling of the child;
+/// * `..` components were not refused, so a name could climb anywhere;
+/// * a fallback resolved the name against the process's working
+///   directory, which has nothing to do with where the child lives, so
+///   the same image opened different files depending on where the
+///   caller happened to be standing.
+///
+/// The reachable consequence is bounded but real: opening an image made
+/// this process open, read and — on the differencing read path — return
+/// the contents of any file the image named that parses as a VHD. A
+/// sandboxed host is a backstop, not a reason for a library to hand it
+/// an arbitrary path.
+///
+/// The format is on the side of the strict reading. The specification
+/// calls this field the parent hard disk *filename*, and the path to a
+/// parent that is not a sibling is what the parent locators are for —
+/// which this crate does not follow yet, and which is where an
+/// out-of-directory parent should arrive when it does.
+///
+/// Both separators are separators here. A Windows-written image spells
+/// its paths with `\`, and refusing only `/` would let those through on
+/// a Unix host as a single strange-looking file name.
+fn parent_file_name(parent_name: &str) -> Result<&str> {
+    if parent_name.is_empty() {
+        return Err(Error::ParentNotFound(
+            "differencing VHD has empty parent name".into(),
+        ));
+    }
+    if parent_name.contains('\0') {
+        return Err(Error::ParentNotFound(
+            "the parent name has a NUL in it, so it is not a file name".into(),
+        ));
+    }
+    if parent_name.contains('/') || parent_name.contains('\\') || parent_name.contains(':') {
+        return Err(Error::ParentNotFound(format!(
+            "the parent name '{parent_name}' is a path rather than a file name, and a \
+             parent is looked for beside the child and nowhere else"
+        )));
+    }
+    if parent_name == "." || parent_name == ".." {
+        return Err(Error::ParentNotFound(format!(
+            "the parent name '{parent_name}' names a directory rather than a file"
+        )));
+    }
+    Ok(parent_name)
 }
 
 // ---------------------------------------------------------------------------

@@ -1312,6 +1312,24 @@ fn build_differencing_vhd_claiming(
     parent_path: &Path,
     parent_unique_id: [u8; 16],
 ) {
+    let name = parent_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    build_differencing_vhd_named(child_path, &name, parent_unique_id);
+}
+
+/// As above, with the parent name written into the header verbatim.
+///
+/// The name is 512 bytes of UTF-16 chosen by whoever wrote the image,
+/// so a test of what the reader accepts has to be able to write one
+/// that no sane tool would.
+fn build_differencing_vhd_named(
+    child_path: &Path,
+    parent_name_text: &str,
+    parent_unique_id: [u8; 16],
+) {
     const SECTOR: u64 = 512;
     const DYN_HEADER_OFF: u64 = SECTOR;
     const BAT_OFF: u64 = SECTOR * 3;
@@ -1328,8 +1346,7 @@ fn build_differencing_vhd_claiming(
     hdr[28..32].copy_from_slice(&2u32.to_be_bytes());
     hdr[32..36].copy_from_slice(&BLOCK_SIZE.to_be_bytes());
     hdr[40..56].copy_from_slice(&parent_unique_id);
-    let parent_name = parent_path.file_name().unwrap().to_string_lossy();
-    for (i, c) in parent_name.encode_utf16().enumerate() {
+    for (i, c) in parent_name_text.encode_utf16().enumerate() {
         if i * 2 + 2 > 512 {
             break;
         }
@@ -1454,4 +1471,137 @@ fn a_parent_whose_unique_id_matches_is_accepted_and_read_through() {
         buf.iter().all(|&b| b == 0xBB),
         "every byte comes from the parent"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Where a parent may be
+// ---------------------------------------------------------------------------
+
+/// An absolute parent name is refused, though the file it names is
+/// there and would open.
+///
+/// `Path::join` with an absolute path replaces the base rather than
+/// extending it, so `child_dir.join("/tmp/x.vhd")` is `/tmp/x.vhd`.
+/// Opening an image therefore made this process open, read and serve
+/// the contents of any file the image named that parses as a VHD.
+///
+/// The parent here is real, matches the child's `parent_unique_id`, and
+/// would be accepted if it were a sibling — so the refusal is about
+/// where it is and nothing else, which is what makes this test about
+/// containment rather than about identity.
+#[test]
+fn an_absolute_parent_name_is_refused_though_the_file_is_there() {
+    let parent = tmp_path("escape_absolute_parent");
+    build_fixed_parent(&parent, [0x22u8; 16], 0xBB);
+
+    // The child lives somewhere else entirely, and names the parent by
+    // its full path.
+    let child = tmp_path("escape_absolute_child");
+    let absolute = parent.to_string_lossy().into_owned();
+    assert!(
+        absolute.starts_with('/'),
+        "the fixture's path is not absolute, so this test proves nothing"
+    );
+    build_differencing_vhd_named(&child, &absolute, [0x22u8; 16]);
+
+    match VhdReader::open(&child) {
+        Err(vhd::Error::ParentNotFound(m)) => assert!(
+            m.contains("path rather than a file name"),
+            "refused, but not for being a path: {m}"
+        ),
+        Ok(_) => panic!("an absolute parent name opened the file it named"),
+        Err(e) => panic!("an absolute parent name gave {e:?}"),
+    }
+}
+
+/// A parent name that climbs out of the child's directory is refused.
+///
+/// `..` was not filtered, so a name could reach anywhere the process
+/// could read. The parent is planted where the name points, so the test
+/// fails if the name is followed.
+#[test]
+fn a_parent_name_that_climbs_out_of_the_directory_is_refused() {
+    let parent = tmp_path("escape_climb_parent");
+    build_fixed_parent(&parent, [0x22u8; 16], 0xBB);
+
+    let child = tmp_path("escape_climb_child");
+    let name = format!(
+        "../{}/{}",
+        parent
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy(),
+        parent.file_name().unwrap().to_string_lossy()
+    );
+    build_differencing_vhd_named(&child, &name, [0x22u8; 16]);
+
+    match VhdReader::open(&child) {
+        Err(vhd::Error::ParentNotFound(m)) => assert!(
+            m.contains("path rather than a file name"),
+            "refused, but not for being a path: {m}"
+        ),
+        Ok(_) => panic!("a climbing parent name opened the file it named"),
+        Err(e) => panic!("a climbing parent name gave {e:?}"),
+    }
+}
+
+/// A Windows-spelled path is a path here too.
+///
+/// An image written by a Windows tool spells its paths with `\`, which
+/// on this host is an ordinary character in a file name. Refusing only
+/// `/` would let `..\..\elsewhere\base.vhd` through as a single
+/// strange-looking sibling — which would not resolve, but would also
+/// not say why, and would resolve on a host where `\` separates.
+#[test]
+fn a_windows_spelled_parent_path_is_refused_as_a_path() {
+    let child = tmp_path("escape_backslash_child");
+    build_differencing_vhd_named(&child, "..\\elsewhere\\base.vhd", [0x22u8; 16]);
+
+    match VhdReader::open(&child) {
+        Err(vhd::Error::ParentNotFound(m)) => assert!(
+            m.contains("path rather than a file name"),
+            "refused, but not for being a path: {m}"
+        ),
+        Ok(_) => panic!("a backslash parent name opened the file it named"),
+        Err(e) => panic!("a backslash parent name gave {e:?}"),
+    }
+}
+
+/// A drive-letter name is a path as well.
+#[test]
+fn a_drive_letter_parent_name_is_refused_as_a_path() {
+    let child = tmp_path("escape_drive_child");
+    build_differencing_vhd_named(&child, "C:base.vhd", [0x22u8; 16]);
+
+    match VhdReader::open(&child) {
+        Err(vhd::Error::ParentNotFound(m)) => assert!(
+            m.contains("path rather than a file name"),
+            "refused, but not for being a path: {m}"
+        ),
+        Ok(_) => panic!("a drive-letter parent name opened the file it named"),
+        Err(e) => panic!("a drive-letter parent name gave {e:?}"),
+    }
+}
+
+/// The refusal is about the name, not about parents: a plain file name
+/// beside the child still opens and still reads through.
+///
+/// Without this the whole set above is satisfied by a reader that
+/// refuses every differencing image, which would be a worse driver than
+/// the one with the defect.
+#[test]
+fn a_plain_parent_name_beside_the_child_still_opens() {
+    let parent = tmp_path("contained_parent");
+    build_fixed_parent(&parent, [0x22u8; 16], 0xBB);
+
+    let child = tmp_path("contained_child");
+    let name = parent.file_name().unwrap().to_string_lossy().into_owned();
+    build_differencing_vhd_named(&child, &name, [0x22u8; 16]);
+
+    let r = VhdReader::open(&child).expect("a sibling parent is where a parent may be");
+    let mut buf = [0u8; 8];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, [0xBB; 8], "the parent's bytes did not come through");
 }
