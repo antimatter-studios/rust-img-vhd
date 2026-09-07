@@ -94,6 +94,19 @@ fn fixed_round_trip() {
     assert_eq!(buf, pattern[100..356]);
 }
 
+/// A read running off the end is refused as `OutOfBounds`, and the
+/// error says how far past the end it went.
+///
+/// The `matches!` that used to stand here was a statement, so its
+/// `bool` was discarded and nothing was asserted: the test passed on
+/// the `unwrap_err()` above it, which only says the read failed
+/// somehow. This reader has other refusals a read can meet —
+/// `ReadOnly` and `Unsupported` among them — and the test could not
+/// tell any of them from the one it is named for.
+///
+/// The three fields are asserted rather than just the variant, because
+/// `size` is the reader's answer to "how big is this image" and a
+/// caller sizing a buffer after a short read acts on it.
 #[test]
 fn fixed_read_past_end_errors() {
     let path = tmp_path("fixed_oob");
@@ -106,8 +119,14 @@ fn fixed_read_past_end_errors() {
 
     let r = VhdReader::open(&path).unwrap();
     let mut buf = [0u8; 16];
-    let err = r.read_at(virt_size - 8, &mut buf).unwrap_err();
-    matches!(err, vhd::Error::OutOfBounds { .. });
+    match r.read_at(virt_size - 8, &mut buf) {
+        Err(vhd::Error::OutOfBounds { offset, len, size }) => {
+            assert_eq!(offset, virt_size - 8, "the refusal names the wrong offset");
+            assert_eq!(len, 16, "the refusal names the wrong length");
+            assert_eq!(size, virt_size, "the refusal names the wrong image size");
+        }
+        other => panic!("a read eight bytes short of the end gave {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
