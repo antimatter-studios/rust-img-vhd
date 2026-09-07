@@ -1137,14 +1137,18 @@ fn open_parent(
 
     if candidate.exists() {
         let dev = FileDevice::open(&candidate).map_err(fs_core_to_vhd_error)?;
-        return VhdReader::open_inner(Arc::new(dev), false, depth_remaining - 1, Some(candidate));
+        let parent =
+            VhdReader::open_inner(Arc::new(dev), false, depth_remaining - 1, Some(candidate))?;
+        return check_parent_identity(parent, dyn_hdr);
     }
 
     // Plain `parent_name` as last resort.
     let direct = PathBuf::from(parent_name);
     if direct.exists() {
         let dev = FileDevice::open(&direct).map_err(fs_core_to_vhd_error)?;
-        return VhdReader::open_inner(Arc::new(dev), false, depth_remaining - 1, Some(direct));
+        let parent =
+            VhdReader::open_inner(Arc::new(dev), false, depth_remaining - 1, Some(direct))?;
+        return check_parent_identity(parent, dyn_hdr);
     }
 
     Err(Error::ParentNotFound(format!(
@@ -1156,6 +1160,51 @@ fn open_parent(
 
 // ---------------------------------------------------------------------------
 // fs_core::BlockRead / BlockDevice bridge
+/// The parent a child found is the parent it named, or it is not its
+/// parent.
+///
+/// A differencing image is a delta: the child holds only the sectors it
+/// changed, and every other sector comes from the parent. Resolution was
+/// purely by *name*, so any file at that path that happened to parse as
+/// a VHD was accepted — and bolting a delta onto a different parent
+/// produces a disk that is internally consistent, opens without
+/// complaint, and is wrong. There is no checksum over the composite, so
+/// nothing downstream detects it either.
+///
+/// Measured on a child declaring `parent_unique_id = 0x11...` and a
+/// parent whose footer carries `0x22...`:
+///
+/// ```text
+/// opened a child whose parent is not the one it names;
+/// read Ok(())  first8=[bb, bb, bb, bb, bb, bb, bb, bb]
+/// ```
+///
+/// The format is explicit that these two must match, and this crate
+/// already parses both: `parent_unique_id` off the dynamic header, and
+/// the parent's `unique_id` off its footer. They were read and never
+/// compared.
+///
+/// `parent_timestamp` is deliberately not enforced. The spec allows a
+/// parent modified after the child was created and readers commonly
+/// proceed, so a mismatch there is a warning rather than a refusal —
+/// and there is nowhere to report a warning yet.
+fn check_parent_identity(parent: VhdReader, dyn_hdr: &DynamicHeader) -> Result<VhdReader> {
+    if parent.footer().unique_id != dyn_hdr.parent_unique_id {
+        return Err(Error::ParentNotFound(format!(
+            "found a parent whose unique_id is {} where the child names {}",
+            hex16(&parent.footer().unique_id),
+            hex16(&dyn_hdr.parent_unique_id),
+        )));
+    }
+    Ok(parent)
+}
+
+/// Sixteen bytes as hex, for an error a person reads.
+fn hex16(id: &[u8; 16]) -> String {
+    id.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
 impl fs_core::BlockRead for VhdReader {
