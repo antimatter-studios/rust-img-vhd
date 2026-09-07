@@ -36,7 +36,19 @@ impl WriteAt for File {
 }
 
 fn build_footer(disk_type: DiskType, data_offset: u64, virt_size: u64) -> [u8; FOOTER_SIZE] {
+    build_footer_with_id(disk_type, data_offset, virt_size, [0u8; 16])
+}
+
+/// As [`build_footer`], with the footer's `unique_id` — the value a
+/// differencing child's `parent_unique_id` has to match.
+fn build_footer_with_id(
+    disk_type: DiskType,
+    data_offset: u64,
+    virt_size: u64,
+    unique_id: [u8; 16],
+) -> [u8; FOOTER_SIZE] {
     let mut f = [0u8; FOOTER_SIZE];
+    f[68..84].copy_from_slice(&unique_id);
     f[0..8].copy_from_slice(FOOTER_COOKIE);
     f[8..12].copy_from_slice(&0x0000_0002u32.to_be_bytes()); // features
     f[12..16].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // file_format_version
@@ -1271,5 +1283,156 @@ fn a_write_spanning_three_sectors_publishes_only_what_was_written() {
         "{} bytes the caller never wrote were published; first at {:?}",
         stray.len(),
         &stray[..stray.len().min(8)]
+    );
+}
+
+/// Build a differencing child that names `parent_path` and declares
+/// `parent_unique_id`.
+fn build_differencing_vhd_claiming(
+    child_path: &Path,
+    parent_path: &Path,
+    parent_unique_id: [u8; 16],
+) {
+    const SECTOR: u64 = 512;
+    const DYN_HEADER_OFF: u64 = SECTOR;
+    const BAT_OFF: u64 = SECTOR * 3;
+    const BLOCK_SIZE: u32 = 4096;
+    const VIRT_SIZE: u64 = 8 * 1024;
+
+    let footer = build_footer(DiskType::Differencing, DYN_HEADER_OFF, VIRT_SIZE);
+
+    let mut hdr = [0u8; DYN_HEADER_SIZE];
+    hdr[0..8].copy_from_slice(DYN_HEADER_COOKIE);
+    hdr[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
+    hdr[16..24].copy_from_slice(&BAT_OFF.to_be_bytes());
+    hdr[24..28].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    hdr[28..32].copy_from_slice(&2u32.to_be_bytes());
+    hdr[32..36].copy_from_slice(&BLOCK_SIZE.to_be_bytes());
+    hdr[40..56].copy_from_slice(&parent_unique_id);
+    let parent_name = parent_path.file_name().unwrap().to_string_lossy();
+    for (i, c) in parent_name.encode_utf16().enumerate() {
+        if i * 2 + 2 > 512 {
+            break;
+        }
+        hdr[64 + i * 2..64 + i * 2 + 2].copy_from_slice(&c.to_be_bytes());
+    }
+    let cs = dyn_cs(&hdr);
+    hdr[36..40].copy_from_slice(&cs.to_be_bytes());
+
+    // BAT: both blocks unallocated, so every byte comes from the parent
+    // — which is what makes the parent's identity the whole answer.
+    let mut bat = [0u8; 512];
+    bat[0..4].copy_from_slice(&BAT_UNALLOCATED.to_be_bytes());
+    bat[4..8].copy_from_slice(&BAT_UNALLOCATED.to_be_bytes());
+
+    let end_of_data = BAT_OFF + 512;
+    let mut f = File::create(child_path).unwrap();
+    f.set_len(end_of_data + FOOTER_SIZE as u64).unwrap();
+    f.write_all_at(&footer, 0).unwrap();
+    f.write_all_at(&hdr, DYN_HEADER_OFF).unwrap();
+    f.write_all_at(&bat, BAT_OFF).unwrap();
+    f.write_all_at(&footer, end_of_data).unwrap();
+}
+
+/// A parent whose `unique_id` and contents are given.
+fn build_fixed_parent(path: &Path, unique_id: [u8; 16], fill: u8) {
+    const VIRT_SIZE: u64 = 8 * 1024;
+    let mut f = File::create(path).unwrap();
+    f.write_all(&vec![fill; VIRT_SIZE as usize]).unwrap();
+    let footer = build_footer_with_id(DiskType::Fixed, u64::MAX, VIRT_SIZE, unique_id);
+    f.write_all(&footer).unwrap();
+}
+
+/// A child must not accept a parent that is not the one it names.
+///
+/// Resolution is by name, so any file at that path that parses as a VHD
+/// was taken. A differencing image is a delta — the child holds only
+/// the sectors it changed — so bolting it onto a different parent
+/// produces a disk that is internally consistent, opens without
+/// complaint, and is wrong, with no checksum over the composite for
+/// anything downstream to catch.
+///
+/// Before this: `read Ok(()) first8=[bb, bb, bb, bb, bb, bb, bb, bb]`,
+/// the wrong parent's bytes served as the child's.
+#[test]
+fn a_parent_that_is_not_the_one_the_child_names_is_refused() {
+    let parent = tmp_path("identity_wrong_parent");
+    build_fixed_parent(&parent, [0x22; 16], 0xBB);
+
+    let child = tmp_path("identity_wrong_child");
+    build_differencing_vhd_claiming(&child, &parent, [0x11; 16]);
+
+    let err = VhdReader::open(&child)
+        .err()
+        .expect("a parent whose unique_id does not match must be refused");
+    match err {
+        vhd::Error::ParentNotFound(m) => {
+            assert!(
+                m.contains("22222222"),
+                "the message must name what it found: {m}"
+            );
+            assert!(m.contains("11111111"), "and what the child asked for: {m}");
+        }
+        other => panic!("expected ParentNotFound, got {other:?}"),
+    }
+}
+
+/// Two ids that differ in exactly one byte are still different ids, and
+/// there is a case at each end.
+///
+/// One minimal difference discriminates only at its own position. The
+/// pair in the test above differ in every byte, so a comparison looking
+/// at only `unique_id[0]` refuses them and passes; a pair differing
+/// only in byte 15 catches that, and a comparison looking at only
+/// `unique_id[15]` then passes instead. Any comparison examining a
+/// strict subset of the bytes misses one end or the other, so both ends
+/// are needed to close the class.
+///
+/// A GUID's bytes are not ordered by significance, so two real ids
+/// agreeing in fifteen of sixteen positions is realistic rather than
+/// contrived — at either end.
+#[test]
+fn a_parent_id_differing_in_one_byte_at_either_end_is_still_a_different_parent() {
+    for at in [0usize, 15] {
+        let mut theirs = [0x22u8; 16];
+        let mut ours = [0x22u8; 16];
+        theirs[at] = 0xFE;
+        ours[at] = 0xFF;
+
+        let parent = tmp_path(&format!("identity_byte{at}_parent"));
+        build_fixed_parent(&parent, theirs, 0xBB);
+
+        let child = tmp_path(&format!("identity_byte{at}_child"));
+        build_differencing_vhd_claiming(&child, &parent, ours);
+
+        assert!(
+            matches!(VhdReader::open(&child), Err(vhd::Error::ParentNotFound(_))),
+            "a difference in byte {at} is still a different parent"
+        );
+    }
+}
+
+/// The positive control: the right parent still opens, and the child
+/// still reads through to it.
+///
+/// Without this, refusing every parent would pass the test above. The
+/// child here has both blocks unallocated, so every byte it serves
+/// comes from the parent — which is what makes the parent's identity
+/// the whole answer rather than a detail.
+#[test]
+fn a_parent_whose_unique_id_matches_is_accepted_and_read_through() {
+    let parent = tmp_path("identity_right_parent");
+    build_fixed_parent(&parent, [0x22; 16], 0xBB);
+
+    let child = tmp_path("identity_right_child");
+    build_differencing_vhd_claiming(&child, &parent, [0x22; 16]);
+
+    let r = VhdReader::open(&child).expect("the named parent must be accepted");
+    assert!(r.has_parent());
+    let mut buf = vec![0u8; 512];
+    r.read_at(0, &mut buf).unwrap();
+    assert!(
+        buf.iter().all(|&b| b == 0xBB),
+        "every byte comes from the parent"
     );
 }
