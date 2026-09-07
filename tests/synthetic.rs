@@ -1133,3 +1133,63 @@ fn the_unmodified_fixture_still_opens_and_reads() {
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf, block);
 }
+
+/// Rebuild the all-sparse fixture with its trailing footer one byte past
+/// the sector boundary, so the file is 3073 bytes long and its last 512
+/// bytes are still a valid footer.
+///
+/// This is the shape the `open_*_on_device` entry points make reachable:
+/// they accept any `BlockDevice`, so the device's length is not this
+/// crate's to assume.
+fn dynamic_with_unaligned_length(name: &str) -> TempPath {
+    let path = tmp_path(name);
+    build_dynamic_vhd_all_sparse(&path);
+    let bytes = std::fs::read(&path).unwrap();
+    let footer = bytes[bytes.len() - FOOTER_SIZE..].to_vec();
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    f.write_all_at(&footer, 512 * 5 + 1).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 512 * 5 + 1 + 512);
+    path
+}
+
+/// A sparse image whose length is not a multiple of 512 is refused,
+/// because its blocks cannot sit where a BAT entry can name them.
+///
+/// Before this, the image opened, `write_at` returned `Ok(())`, and the
+/// bytes it wrote were unreachable for ever: the block landed at 2561,
+/// the BAT recorded 2561 / 512 == 5, and the reader went to 2560.
+#[test]
+fn a_sparse_image_whose_length_is_not_a_multiple_of_512_is_refused() {
+    let path = dynamic_with_unaligned_length("unaligned_len");
+    let err = VhdReader::open(&path)
+        .err()
+        .expect("an off-grid sparse image must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+
+    let err = VhdReader::open_rw(&path)
+        .err()
+        .expect("and refused for writing too");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}
+
+/// The positive control: the same fixture at its natural length still
+/// opens, allocates on first write, and reads the bytes back.
+#[test]
+fn an_aligned_sparse_image_still_allocates_and_reads_back() {
+    let path = tmp_path("aligned_len");
+    build_dynamic_vhd_all_sparse(&path);
+    let payload = [0xABu8; 16];
+    {
+        let r = VhdReader::open_rw(&path).unwrap();
+        r.write_at(0, &payload).unwrap();
+        r.flush_writes().unwrap();
+    }
+    let r = VhdReader::open(&path).unwrap();
+    let mut buf = [0u8; 16];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, payload);
+}

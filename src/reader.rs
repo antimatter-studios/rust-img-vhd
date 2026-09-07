@@ -163,6 +163,32 @@ impl VhdReader {
                         "dynamic/differencing footer has data_offset = 0xFFFF...",
                     ));
                 }
+                // A BAT entry is a sector index, so every block in a
+                // sparse image has to sit on a sector boundary — and the
+                // allocator places blocks relative to the device's tail.
+                // A device whose length is not a multiple of 512 puts
+                // that tail off-grid, and then the entry written for the
+                // first allocated block names the sector BELOW the data,
+                // silently, because the division truncates. Measured on
+                // a 3073-byte image built from the all-sparse fixture:
+                //
+                //     write_at -> Ok(())
+                //     bat[0]=5 -> host 2560   (the block is at 2561)
+                //     reopen read -> Ok(())  buf=[00 x 16]
+                //
+                // Sixteen bytes written, no error, and nothing can ever
+                // read them back.
+                //
+                // Refusing is the honest answer rather than rounding the
+                // tail down: the footer was found at `dev_size - 512`,
+                // so an unaligned length means the image's own layout is
+                // already off-grid and the bytes between the last block
+                // and the footer belong to nothing.
+                if !dev_size.is_multiple_of(SECTOR_SIZE) {
+                    return Err(Error::Corrupt(
+                        "sparse image length is not a multiple of 512, so its blocks cannot sit on sector boundaries",
+                    ));
+                }
                 let mut hdr_bytes = [0u8; DYN_HEADER_SIZE];
                 dev.read_at(footer.data_offset, &mut hdr_bytes)
                     .map_err(fs_core_to_vhd_error)?;
@@ -884,7 +910,7 @@ impl VhdReader {
         }
 
         // Step 2: publish the new block in the on-disk BAT.
-        let bat_value = (new_block_off / SECTOR_SIZE) as u32;
+        let bat_value = bat_entry_for(new_block_off)?;
         let bat_entry_off = dyn_hdr.table_offset + (block_idx as u64) * 4;
         self.dev_write(bat_entry_off, &bat_value.to_be_bytes())?;
         self.dev_flush()?;
@@ -929,6 +955,40 @@ impl VhdReader {
         self.dev_write(block_host_off, &bitmap)?;
         Ok(())
     }
+}
+
+/// The BAT entry that names the block at `host_off`.
+///
+/// A BAT entry is a **sector index**, so the division only tells the
+/// truth when three things hold, and a bare `as u32` checks none of
+/// them:
+///
+/// * `host_off` is sector-aligned. Otherwise the division truncates and
+///   the entry names the sector below the block — a read shifted by up
+///   to 511 bytes, with no error anywhere.
+/// * The index fits a `u32`. VHD's addressing tops out near that limit,
+///   and a host offset at or past 2 TiB wraps into a small index that
+///   points back into the image's own metadata.
+/// * The index is not `BAT_UNALLOCATED`. A block landing at host offset
+///   `0x1FFF_FFFF_E00` produces exactly that value, and the entry then
+///   publishes the block as *absent*: the data is written, the footer
+///   is moved past it, and every later read of that block returns
+///   zeros.
+fn bat_entry_for(host_off: u64) -> Result<u32> {
+    if !host_off.is_multiple_of(SECTOR_SIZE) {
+        return Err(Error::Corrupt(
+            "a block was placed at an offset that is not a sector boundary",
+        ));
+    }
+    let entry = u32::try_from(host_off / SECTOR_SIZE).map_err(|_| {
+        Error::Corrupt("a block was placed past the highest sector a BAT entry can name")
+    })?;
+    if entry == BAT_UNALLOCATED {
+        return Err(Error::Corrupt(
+            "a block was placed at the one sector the BAT reserves to mean \"absent\"",
+        ));
+    }
+    Ok(entry)
 }
 
 /// Open the differencing parent VHD.
@@ -1093,6 +1153,40 @@ mod tests {
                 "sector {sector}"
             );
         }
+    }
+
+    /// The three ways a bare `as u32` on `host_off / 512` lies.
+    ///
+    /// Each of these produced a number the write path published as a
+    /// BAT entry, and none of them named the block that had just been
+    /// written.
+    #[test]
+    fn a_bat_entry_is_only_computed_from_an_address_it_can_name() {
+        // The ordinary case still works.
+        assert_eq!(bat_entry_for(2048).unwrap(), 4);
+
+        // Unaligned: the division would truncate to the sector below.
+        let err = bat_entry_for(2561).unwrap_err();
+        assert!(
+            matches!(err, Error::Corrupt(m) if m.contains("sector boundary")),
+            "got {err:?}"
+        );
+
+        // Past what a u32 sector index can address.
+        let err = bat_entry_for((u32::MAX as u64 + 1) * SECTOR_SIZE).unwrap_err();
+        assert!(
+            matches!(err, Error::Corrupt(m) if m.contains("highest sector")),
+            "got {err:?}"
+        );
+
+        // Exactly the sentinel: 0xFFFF_FFFF * 512 is a legal-looking
+        // offset whose entry means "there is no block here".
+        let sentinel_off = BAT_UNALLOCATED as u64 * SECTOR_SIZE;
+        let err = bat_entry_for(sentinel_off).unwrap_err();
+        assert!(
+            matches!(err, Error::Corrupt(m) if m.contains("absent")),
+            "got {err:?}"
+        );
     }
 
     /// The invariant that lets both helpers index without checking.
