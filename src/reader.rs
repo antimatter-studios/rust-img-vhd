@@ -782,6 +782,12 @@ impl VhdReader {
                 bat_entry as u64 * SECTOR_SIZE
             };
 
+            // Before the payload lands, give the parts of any
+            // partly-covered sector the contents a reader sees there
+            // today — because the bitmap bits set below publish whole
+            // sectors, not the byte range the caller asked for.
+            self.define_partial_sectors(block_host_off, block_idx, in_block, chunk_len as u64)?;
+
             // Splice the user payload into the block at [in_block,
             // in_block + chunk_len).
             let src = &buf[written..written + chunk_len];
@@ -934,6 +940,106 @@ impl VhdReader {
         self.dev_flush()?;
 
         Ok(new_block_off)
+    }
+
+    /// Give the untouched parts of a partly-written sector the contents
+    /// a reader sees there today, so that setting the sector's bitmap
+    /// bit does not publish bytes the caller never wrote.
+    ///
+    /// The unit the bitmap describes is a **sector**. A clear bit means
+    /// "this sector reads as zero" — or, for a differencing child,
+    /// "read it from the parent". It does *not* mean the corresponding
+    /// bytes in the block's data area are zero: the format leaves them
+    /// undefined and a writer is free to leave anything there. So a
+    /// write that starts or ends mid-sector inside a block that already
+    /// exists, over a sector whose bit was clear, used to flip the rest
+    /// of that sector from "reads as zero" to "reads whatever was in
+    /// the file". Measured on a fixture whose block 0 is allocated with
+    /// an all-clear bitmap and a data area of `0xEE`, writing 16 bytes
+    /// at offset 100 and reading `[0, 512)` back:
+    ///
+    /// ```text
+    /// before write, read@0  = [00, 00, 00, 00, 00, 00, 00, 00]
+    /// after  write, [0..8]  = [ee, ee, ee, ee, ee, ee, ee, ee]
+    /// bytes published that the caller never wrote: 496
+    /// ```
+    ///
+    /// Images this crate allocated itself were never exposed, because
+    /// `allocate_block_locked` zeroes the whole range first. It bites on
+    /// an image somebody else allocated — which `open_rw` and
+    /// `open_rw_on_device` explicitly support.
+    ///
+    /// Only the first and last sector of a chunk can be partly covered;
+    /// everything between them is overwritten in full, so what was there
+    /// does not matter.
+    ///
+    /// The contents come from [`VhdReader::read_block_unallocated`],
+    /// which is zeros for a dynamic image and the parent's bytes for a
+    /// differencing child. The differencing write path is refused today,
+    /// so only the first arm runs — but writing it this way is what
+    /// stops the second one arriving with the same hole, where it would
+    /// be worse: "defer to parent" would become "return stale leaf
+    /// bytes", which are plausible rather than obviously wrong.
+    fn define_partial_sectors(
+        &self,
+        block_host_off: u64,
+        block_idx: usize,
+        in_block: u64,
+        len: u64,
+    ) -> Result<()> {
+        let block_size = self
+            .dynamic
+            .as_ref()
+            .ok_or(Error::Corrupt("sparse write but no dynamic header"))?
+            .block_size as u64;
+        let bitmap_size = self.bitmap_size;
+
+        let mut bitmap = vec![0u8; bitmap_size as usize];
+        self.dev_read(block_host_off, &mut bitmap)?;
+
+        let first = in_block / SECTOR_SIZE;
+        let last = (in_block + len - 1) / SECTOR_SIZE;
+
+        // A single-sector write has one partly-covered sector, not two.
+        let ends: &[u64] = if first == last {
+            &[first]
+        } else {
+            &[first, last]
+        };
+        for &sector in ends {
+            // Already published: its bytes are somebody's real data.
+            if Self::bitmap_get(&bitmap, sector) {
+                continue;
+            }
+            let sector_start = sector * SECTOR_SIZE;
+            let head = in_block.saturating_sub(sector_start).min(SECTOR_SIZE);
+            let covered_end = (in_block + len)
+                .saturating_sub(sector_start)
+                .min(SECTOR_SIZE);
+            if head == 0 && covered_end == SECTOR_SIZE {
+                continue; // the payload covers the whole sector
+            }
+
+            let mut sector_bytes = vec![0u8; SECTOR_SIZE as usize];
+            let virt = (block_idx as u64) * block_size + sector_start;
+            self.read_block_unallocated(virt, &mut sector_bytes)?;
+
+            // Only the parts the payload will not cover, so the payload
+            // write stays the one that publishes the rest.
+            if head > 0 {
+                self.dev_write(
+                    block_host_off + bitmap_size + sector_start,
+                    &sector_bytes[..head as usize],
+                )?;
+            }
+            if covered_end < SECTOR_SIZE {
+                self.dev_write(
+                    block_host_off + bitmap_size + sector_start + covered_end,
+                    &sector_bytes[covered_end as usize..],
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Set the bitmap bits for sectors covered by virtual range
