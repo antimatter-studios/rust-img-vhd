@@ -335,3 +335,68 @@ fn qemu_geometry_is_a_fixed_point_of_our_ladder() {
         );
     }
 }
+
+/// The BAT's file offset and entry count, read out of a real image's own
+/// dynamic header.
+///
+/// Reading the reference tool's layout rather than assuming ours is the
+/// point: the bound this exercises has to hold for the images other
+/// producers write, not only for the fixtures in `synthetic.rs`.
+fn bat_location(path: &Path) -> (u64, u32) {
+    let bytes = std::fs::read(path).expect("read image");
+    let data_offset = u64::from_be_bytes(bytes[16..24].try_into().unwrap());
+    let h = &bytes[data_offset as usize..data_offset as usize + 1024];
+    (
+        u64::from_be_bytes(h[16..24].try_into().unwrap()),
+        u32::from_be_bytes(h[28..32].try_into().unwrap()),
+    )
+}
+
+fn patch(path: &Path, off: u64, bytes: &[u8]) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    f.seek(SeekFrom::Start(off)).unwrap();
+    f.write_all(bytes).unwrap();
+}
+
+/// A BAT entry naming the image's own metadata is refused, on an image
+/// the reference tool produced.
+///
+/// The synthetic fixtures pin the same rule, but they are laid out by
+/// this repository, so they cannot say whether the bound is right for
+/// anybody else's images. This one converts a real pattern to a real
+/// dynamic VHD, checks it reads correctly, and only then moves one
+/// entry — so a bound that was too tight would fail on the first half
+/// rather than pass vacuously on the second.
+#[test]
+fn a_bat_entry_in_the_metadata_is_refused_on_a_qemu_produced_image() {
+    let raw = raw_path("bat-src");
+    let vhd = vhd_path("bat-dst");
+
+    let data = pattern(3 * 1024 * 1024);
+    std::fs::write(&raw, &data).unwrap();
+    qemu_convert_raw_to_vpc(&raw, &vhd);
+
+    // Positive control: the untouched image opens and reads.
+    {
+        let r = VhdReader::open(&vhd).unwrap();
+        assert_eq!(r.disk_type(), DiskType::Dynamic);
+        let mut buf = vec![0u8; data.len()];
+        r.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, data, "byte mismatch on the untouched qemu image");
+    }
+
+    let (bat_off, entries) = bat_location(&vhd);
+    assert!(entries > 0, "qemu image should have BAT entries");
+    // Sector 0 is the footer mirror.
+    patch(&vhd, bat_off, &0u32.to_be_bytes());
+
+    let err = VhdReader::open(&vhd)
+        .err()
+        .expect("a BAT entry naming the footer mirror must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}

@@ -214,6 +214,84 @@ impl VhdReader {
 
                 let bitmap_size = dyn_hdr.bitmap_size_bytes();
 
+                // The table's SIZE was bounded above; its CONTENTS were
+                // not, and an entry is a sector index the image chose.
+                // `read_sparse` multiplied it by 512 and read a sector
+                // bitmap from wherever it landed, so an entry of 0 made
+                // the footer mirror the bitmap and the bytes after it the
+                // block's data — and the read succeeded. Measured on the
+                // standard fixture with entry 0 zeroed, a read at virtual
+                // offset 1024 came back as the image's own BAT:
+                //
+                //     Ok(())  buf=[00, 00, 00, 00, ff, ff, ff, ff, ...]
+                //
+                // where the block really holds 00 01 02 03 04 05 06 07.
+                //
+                // So walk the table once, here, where the numbers that
+                // bound it have all just been computed. An image whose
+                // table cannot be believed is refused before a caller
+                // holds a reader for it, rather than one block at a time
+                // on the read path.
+                let metadata_end = [
+                    FOOTER_SIZE as u64,
+                    footer
+                        .data_offset
+                        .checked_add(DYN_HEADER_SIZE as u64)
+                        .ok_or(Error::Corrupt("dynamic header extent overflows"))?,
+                    table_end,
+                ]
+                .into_iter()
+                .max()
+                .expect("the array is not empty");
+                let data_start = metadata_end.div_ceil(SECTOR_SIZE) * SECTOR_SIZE;
+                let block_total = bitmap_size
+                    .checked_add(dyn_hdr.block_size as u64)
+                    .ok_or(Error::Corrupt("block extent overflows"))?;
+
+                // The data area ends where the trailing footer begins,
+                // not at the end of the file. `dev_size` was the first
+                // bound written here and it is a footer too generous: a
+                // block ending at exactly `dev_size` has the footer as
+                // its last sector, so a read of that sector returns
+                // `conectix` and the rest of the footer as the guest's
+                // file data — which is the defect this walk exists to
+                // stop, arriving through the check meant to stop it.
+                //
+                // This is the same number the allocator uses for the
+                // tail, computed once and shared rather than written
+                // twice with a footer between the two spellings.
+                let next_alloc = dev_size.saturating_sub(FOOTER_SIZE as u64);
+                let data_end = next_alloc;
+
+                let mut allocated: Vec<u32> = Vec::new();
+                for &entry in &bat {
+                    if entry == BAT_UNALLOCATED {
+                        continue;
+                    }
+                    let block_off = (entry as u64) * SECTOR_SIZE;
+                    if block_off < data_start {
+                        return Err(Error::Corrupt(
+                            "BAT entry names a block inside the image's own metadata",
+                        ));
+                    }
+                    let block_end = block_off
+                        .checked_add(block_total)
+                        .ok_or(Error::Corrupt("BAT entry's block extent overflows"))?;
+                    if block_end > data_end {
+                        return Err(Error::Corrupt(
+                            "BAT entry names a block running into the trailing footer or past it",
+                        ));
+                    }
+                    allocated.push(entry);
+                }
+                // Two entries at one address is an aliased image: a write
+                // through one virtual block silently changes another.
+                // One sort answers it.
+                allocated.sort_unstable();
+                if allocated.windows(2).any(|w| w[0] == w[1]) {
+                    return Err(Error::Corrupt("two BAT entries name the same block"));
+                }
+
                 let parent = if footer.disk_type == DiskType::Differencing {
                     let child_path = owning_path.as_deref().ok_or(Error::Unsupported(
                         "differencing VHD opened on a raw device; parent resolution needs a path",
@@ -227,11 +305,12 @@ impl VhdReader {
                     None
                 };
 
-                // The trailing footer sits at dev_size - 512. Future
-                // allocations land at that offset (pushing the footer
-                // forward), assuming the device was sized to "end of
-                // data + footer" — the canonical layout.
-                let next_alloc = dev_size.saturating_sub(FOOTER_SIZE as u64);
+                // The trailing footer sits at dev_size - 512, so
+                // `next_alloc` (computed above, where the BAT walk needs
+                // the same number) is where the next block goes: future
+                // allocations land at that offset and push the footer
+                // forward, assuming the device was sized to "end of data
+                // + footer" — the canonical layout.
 
                 (
                     Some(dyn_hdr),
