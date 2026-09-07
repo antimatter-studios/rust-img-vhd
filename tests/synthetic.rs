@@ -1605,3 +1605,52 @@ fn a_plain_parent_name_beside_the_child_still_opens() {
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf, [0xBB; 8], "the parent's bytes did not come through");
 }
+
+/// A parent that exists only in the process's working directory is not
+/// found.
+///
+/// The old resolution had a third route out of the child's directory,
+/// beside the absolute name and the `..` climb: when the join produced
+/// nothing, it fell back to `PathBuf::from(parent_name)`, which
+/// resolves against the CWD. A filtered name is exactly a bare file
+/// name, which is what that fallback takes — so the filter does not
+/// make the fallback dead, and removing it is a second behaviour
+/// change that needs its own test.
+///
+/// Without it, the same image opens different files depending on where
+/// the caller happens to be standing, which is not something an image
+/// reader should be sensitive to.
+///
+/// The parent is planted in the working directory rather than beside
+/// the child, and the child names it plainly. Cargo runs an
+/// integration test with the crate root as the working directory, so
+/// this needs no `set_current_dir` — which would be unsafe here in any
+/// case, the working directory being process-global while the harness
+/// threads.
+#[test]
+fn a_parent_only_in_the_working_directory_is_not_found() {
+    let name = "vhd_cwd_only_parent_5f3a.vhd";
+    let in_cwd = std::env::current_dir().unwrap().join(name);
+    // Not a TempPath: the point is that it is somewhere tmp_path is
+    // not. Removed at the end, and named distinctively enough that a
+    // leftover is recognisable.
+    build_fixed_parent(&in_cwd, [0x22u8; 16], 0xBB);
+
+    let child = tmp_path("cwd_fallback_child");
+    build_differencing_vhd_named(&child, name, [0x22u8; 16]);
+
+    let opened = VhdReader::open(&child);
+    let _ = std::fs::remove_file(&in_cwd);
+
+    match opened {
+        Err(vhd::Error::ParentNotFound(m)) => assert!(
+            m.contains("beside the child"),
+            "refused, but not for the parent's absence beside the child: {m}"
+        ),
+        Ok(_) => panic!(
+            "a parent in the working directory was opened, so the same image \
+             reads different files depending on where the caller stands"
+        ),
+        Err(e) => panic!("a working-directory parent gave {e:?}"),
+    }
+}
