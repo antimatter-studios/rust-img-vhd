@@ -3,7 +3,12 @@
  * returns a generic FsCoreDevice handle. Once opened, all further
  * interaction goes through fs_core.h's device API.
  *
- * Link with libam_img_vhd.a and include this header alongside fs_core.h.
+ * Link with libvhd.a and include this header alongside fs_core.h.
+ *
+ * `chore staticlib` builds that library and copies both headers beside
+ * it; `chore artifact` prints the absolute path of the directory
+ * holding them. That contract lives in chores.yml, which is not
+ * anywhere a C consumer would look, so it is repeated here.
  *
  * MIT license. (c) 2026 Antimatter Studios.
  */
