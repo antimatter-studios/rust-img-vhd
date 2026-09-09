@@ -28,6 +28,18 @@ qemu-validation = []
 am-fs-core = { path = "../rust-fs-core", version = "0.2.10" }
 
 [dev-dependencies]
+# YAML parser for tests/ci_profile.rs, which reads .github/workflows/ci.yml
+# and refuses if the debug run that lets the PR gate see an arithmetic
+# overflow has been removed or disabled. It PARSES the file rather than
+# scanning its text: quoted keys, block scalars, comments and nested
+# mappings are the grammar, not edge cases, and a guard that misreads
+# its input reports protection it is not providing. Pure Rust, YAML 1.2
+# (so GitHub's `on:` key stays the string `on` and is not folded into a
+# boolean), MIT/Apache-2.0, and no C to transpile -- unlike serde_yaml,
+# which is deprecated and wraps unsafe-libyaml. Dev-only: it never
+# reaches a consumer of this crate. Same version as the siblings, so the
+# copies of this guard stay one answer rather than several.
+saphyr = "0.0.12"
 # JSON parsing for `qemu-img info --output=json` in the qemu-validation
 # test harness. Test-only.
 serde_json = "1"
