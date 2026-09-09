@@ -57,6 +57,37 @@ tasks:
       # fs_core.h is a source of ours because we ship it (see the cp below).
       # THIS PATH AND THE cp MUST AGREE, and nothing checks that they do.
       - '../rust-fs-core/include/fs_core.h'
+      # THE GUARD IS PART OF THIS TASK, SO IT IS PART OF THE FINGERPRINT.
+      #
+      # The first command below runs
+      # tests/header_names_the_built_library.rs, and neither that file
+      # nor this one was a source -- so editing the guard left the task
+      # up to date and the guard did not run. Force its body to fail,
+      # change nothing else, and `chore staticlib` prints exactly
+      # "task: staticlib is up to date" and executes nothing.
+      #
+      # A check whose result nothing re-reads, in the step that decides
+      # what ships. chores.yml is here for the same reason: the command
+      # list, the artefact paths and the guard's invocation all live in
+      # this file, and a change to any of them changes the task.
+      #
+      # THE FILE THE TASK RUNS, NOT THE DIRECTORY IT LIVES IN. The
+      # sibling closed this with 'tests/**/*.rs', which fingerprints
+      # every file in tests/ -- 6 here -- while `cmds:` runs exactly
+      # one target, so editing an unrelated test re-runs the whole task
+      # including the cross-target release build it could not have
+      # affected. That is rust-img-vhdx#85, and copying the fix verbatim
+      # reproduces it.
+      #
+      # DO NOT ANSWER EITHER BY DROPPING THE ENTRY. The rule is that
+      # `sources:` names what the task READS -- so if a second `--test`
+      # target is ever added below, its file belongs here beside this
+      # one.
+      # `the_staticlib_task_fingerprints_the_tests_it_runs_and_no_others`
+      # in tests/header_names_the_built_library.rs refuses both
+      # directions.
+      - 'tests/header_names_the_built_library.rs'
+      - chores.yml
 
     # Templated, which is fine here where it is not fine above: UpToDate
     # renders these before expanding them, and every entry is an exact path
@@ -86,6 +117,10 @@ tasks:
       #
       # It stays FIRST so a mismatch costs no release build.
       - 'cargo test --locked --test header_names_the_built_library'
+      # Idempotent, and it replaces the old script's "is the target installed"
+      # `rustup target list --installed | grep` dance: rustup answers "up to
+      # date" without touching the network when it is. It runs here rather
+      # than in the consumer because the triple is ours.
       - 'rustup target add {{.TRIPLE}}'
       - 'cargo build --release --target {{.TRIPLE}}'
       - 'mkdir -p "{{.OUT}}/include"'
