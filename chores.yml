@@ -67,37 +67,25 @@ tasks:
       - '{{.OUT}}/include/{{.LIBNAME}}.h'
 
     cmds:
-      # THE HEADER MUST NAME THE LIBRARY THIS TASK ACTUALLY BUILDS,
-      # and it is checked FIRST so a mismatch costs no build.
+      # THE HEADER CHECK IS THE TEST, NOT A SECOND COPY OF IT.
       #
-      # include/vhd.h said `libam_img_vhd.a` for as long as the file
-      # existed, and cargo has never produced that name -- `[lib] name`
-      # is vhd, so the artefact is libvhd.a, which is exactly what the
-      # `cp` below copies. A C consumer following the header got a
-      # linker error for a library nobody builds. Six of the twelve
-      # constellation repositories had the same mismatch and five had it
-      # right, so it is not a rule anyone applies once; it drifts.
+      # This was a shell fragment that grepped the header and compared
+      # what it found against `lib{{.LIBNAME}}.a` -- a value derived
+      # from the same hand-maintained LIBNAME variable it was checking.
+      # A LIBNAME/Cargo.toml drift, which is precisely what it existed
+      # to catch, passed it silently: rename `[lib] name` and cargo
+      # builds a different artefact while the guard compares LIBNAME
+      # against itself and agrees. A check whose two sides come from one
+      # source cannot fail.
       #
-      # The empty case fails too: a header naming no lib*.a leaves a
-      # consumer with no link guidance and would otherwise pass a
-      # comparison over nothing.
-      - >-
-        named=$(grep -oE 'lib[A-Za-z0-9_]+\.a' include/{{.LIBNAME}}.h | sort -u);
-        want='lib{{.LIBNAME}}.a';
-        if [ -z "$named" ]; then
-          echo "include/{{.LIBNAME}}.h names no lib*.a; it must tell a consumer to link $want" >&2;
-          exit 1;
-        fi;
-        for n in $named; do
-          if [ "$n" != "$want" ]; then
-            echo "include/{{.LIBNAME}}.h says link $n, but this task builds $want" >&2;
-            exit 1;
-          fi;
-        done
-      # Idempotent, and it replaces the old script's "is the target installed"
-      # `rustup target list --installed | grep` dance: rustup answers "up to
-      # date" without touching the network when it is. It runs here rather
-      # than in the consumer because the triple is ours.
+      # tests/header_names_the_built_library.rs derives the expected
+      # name from Cargo.toml's `[lib] name` -- the thing that actually
+      # decides the artefact -- with a real TOML parser rather than a
+      # line scan. Running it here means one implementation instead of
+      # two, and the one that is already exercised by CI.
+      #
+      # It stays FIRST so a mismatch costs no release build.
+      - 'cargo test --locked --test header_names_the_built_library'
       - 'rustup target add {{.TRIPLE}}'
       - 'cargo build --release --target {{.TRIPLE}}'
       - 'mkdir -p "{{.OUT}}/include"'
