@@ -84,67 +84,877 @@ fn read_or_panic(path: &Path) -> String {
     })
 }
 
+/// The command lines of a shell script, with comments removed.
+///
+/// ONE PLACE, because two callers used to disagree about what a
+/// comment is. `runs_with_overflow_checks` stripped them and
+/// `step_declares_the_handshake` read `step.run` raw, so a step could
+/// be armed by a line that never executes:
+///
+///     run: |
+///       # EXPECT_OVERFLOW_CHECKS=1 -- see ci_profile.rs
+///       cargo test --locked --all-targets
+///
+/// The handshake half said yes on the comment, the command half found
+/// the real run, both workflow assertions passed, and the process got
+/// no `EXPECT_OVERFLOW_CHECKS` -- so the runtime probe returned without
+/// asserting anything. Two readers of one text must not have two
+/// grammars.
+///
+/// It is shell, not YAML: [`parse_workflow`] has already removed the
+/// workflow's own comments, and what reaches here is the inside of a
+/// `run:` block, where `#` is the shell's comment character.
+fn command_lines(script: &str) -> Vec<&str> {
+    script
+        .lines()
+        .map(str::trim_start)
+        .map(|line| match comment_start(line) {
+            Some(at) => &line[..at],
+            None => line,
+        })
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// Where a shell comment begins on a line, if it does.
+///
+/// A `#` is the comment character only where a WORD begins: at the
+/// start of the line, or after a character that ends a word. The rule
+/// used to be `line.split(" #")`, which is that rule written for
+/// exactly one such character, so a comment glued to a terminator
+/// survived into the line and was read as part of it:
+///
+///     cargo test --locked --lib;# EXPECT_OVERFLOW_CHECKS=1 is set in CI
+///
+/// The handshake half found the variable in the comment, the command
+/// half found a real debug run before it, and the step counted as
+/// arming a probe the process would never receive.
+///
+/// THE ALPHABET IS [`shell_commands`]' OWN SEPARATOR SET, not a second
+/// one invented here. That is the whole point: two readers of one text
+/// must not have two grammars, which is why `command_lines` exists at
+/// all. `|` and a tab are in the set and were not holes -- other
+/// mechanisms already caught them -- and they are handled here because
+/// the rule is "a word begins", not because either was measured
+/// escaping.
+///
+/// A `#` inside quotes is data, and so is one inside a word:
+/// `--features a#b` is one argument, and cutting at it would truncate
+/// a real command and make the guard refuse a correct workflow.
+fn comment_start(line: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut at_word_start = true;
+    for (index, c) in line.char_indices() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            at_word_start = false;
+            continue;
+        }
+        match c {
+            '#' if at_word_start => return Some(index),
+            '\'' | '"' => {
+                quote = Some(c);
+                at_word_start = false;
+            }
+            ';' | '&' | '|' | '(' | ')' => at_word_start = true,
+            c if c.is_whitespace() => at_word_start = true,
+            _ => at_word_start = false,
+        }
+    }
+    None
+}
+
+/// Whether a line turns `set -e` off.
+///
+/// Actions runs a `run:` block as `bash -e`, so a failing command ends
+/// the step. `set +e` withdraws that for everything after it, which
+/// makes every command in the block advisory -- including the one this
+/// file exists to require. Recognised in all its spellings (`set +e`,
+/// `set +ex`, `set +o errexit`) rather than as a fixed string.
+///
+/// IT TOKENISES WITH [`shell_commands`] RATHER THAN `split_whitespace`.
+/// Whitespace is not what ends a word in a shell, so the option name
+/// with the next command's punctuation glued to it -- `set +o
+/// errexit;`, `set +o errexit&&` -- read as `errexit;`, which is not
+/// `errexit`, and the withdrawal was invisible. Only the detached
+/// `set +o errexit ;` was caught, which is the spelling nobody writes.
+///
+/// Sharing the tokeniser also settles the quoted case for free:
+/// `echo "set +o errexit"` yields the words `["echo", ""]`, so a
+/// printed withdrawal withdraws nothing.
+fn disables_errexit(line: &str) -> bool {
+    shell_commands(line)
+        .iter()
+        .any(|(words, _)| set_disables_errexit(words))
+}
+
+/// Whether one tokenised command is a `set` that turns `errexit` off.
+fn set_disables_errexit(words: &[String]) -> bool {
+    let mut words = words.iter().map(String::as_str);
+    if words.next() != Some("set") {
+        return false;
+    }
+    let mut expecting_option_name = false;
+    for word in words {
+        if expecting_option_name {
+            if word == "errexit" {
+                return true;
+            }
+            expecting_option_name = false;
+            continue;
+        }
+        if word == "+o" {
+            expecting_option_name = true;
+            continue;
+        }
+        if let Some(flags) = word.strip_prefix('+') {
+            if flags.contains('e') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// What follows a command on its line, and therefore whether the shell
+/// reads the command's exit status.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Sep {
+    /// Nothing -- the command ends the line.
+    End,
+    /// `&&`: the chain fails if this command fails.
+    And,
+    /// `||`: the failure is caught and discarded.
+    Or,
+    /// `;`: under `bash -e` a failure still ends the step, because
+    /// `-e` aborts before the next command runs. MEASURED, not
+    /// reasoned: `bash -e -c 'false; echo REACHED'` prints nothing and
+    /// exits 1.
+    Semi,
+    /// `|`: the line's status becomes the LAST command's. Actions'
+    /// default `bash -e` does not set `pipefail`.
+    Pipe,
+    /// `&`: backgrounded, so nothing waits for it.
+    Amp,
+}
+
+/// Index of the `)` that closes the `$( )` / `<( )` / `>( )` span whose
+/// `(` is at `open`, or `None` if the span is never closed.
+///
+/// # WHY THIS IS NOT A PAREN COUNT
+///
+/// It was one, and it was wrong in BOTH directions, because deciding
+/// where a span ends is itself shell parsing. Verdicts below taken from
+/// `bash -e -c`, not from reading this file:
+///
+/// | line | bash | a bare paren count |
+/// |---|---|---|
+/// | `cat <(echo a\) ; false)` | exit 0 — swallowed | closes at `\)`, so the `false` reads as top-level: **a swallowed suite counted as a gate** |
+/// | `cat <(echo "a)") ; false` | exit 1 — the `false` IS read | closes at the quoted `)`, then the stray `"` opens a quote that eats the rest: **a real gate refused** |
+///
+/// The first is the defect this file exists to prevent. The second is
+/// the one this file's own history warns about — a guard that starts
+/// refusing correct workflows — and it is why a `\)` special case would
+/// not have been a fix.
+///
+/// The rules are the shell's, and the same ones the tokeniser below
+/// already applies fifteen lines on: outside quotes a backslash escapes
+/// the next character; inside `"` it still does; inside `'` there are no
+/// escapes at all and a backslash is data. Parentheses inside any quote
+/// are data.
+fn end_of_substitution(chars: &[char], open: usize) -> Option<usize> {
+    debug_assert_eq!(chars.get(open), Some(&'('), "open must index the `(`");
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut j = open;
+    while j < chars.len() {
+        let c = chars[j];
+        match quote {
+            // No escapes inside `'`; only another `'` ends it.
+            Some('\'') => {
+                if c == '\'' {
+                    quote = None;
+                }
+            }
+            Some(q) => {
+                if c == '\\' && j + 1 < chars.len() {
+                    j += 2;
+                    continue;
+                }
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if c == '\\' && j + 1 < chars.len() {
+                    j += 2;
+                    continue;
+                }
+                // A NESTED SPAN'S PARENTHESES ARE ITS OWN. Quotes and
+                // escapes were tracked and these two were not, so a `)`
+                // inside a nested backtick span or a `${...}` closed the
+                // OUTER substitution early. Both directions were
+                // measured against `bash -e -c`:
+                //
+                //   echo $(echo `echo x)`) ; cargo test --lib
+                //       bash reads the trailing status; the span closed
+                //       at the `)` inside the backticks, the unmatched
+                //       backtick then ate the rest of the line, and a
+                //       real gate was DROPPED.
+                //
+                //   $(echo ${x:+)} ; cargo test --lib)
+                //       bash swallows it; the span closed at the `)`
+                //       inside `${...}`, so the `cargo test` read as
+                //       top-level and a swallowed suite was COUNTED.
+                //
+                // Skipping the nested span is the same answer as for a
+                // quote: what is inside it is not this scanner's
+                // punctuation.
+                if c == '`' {
+                    match end_of_backticks(chars, j) {
+                        Some(close) => {
+                            j = close + 1;
+                            continue;
+                        }
+                        None => return None,
+                    }
+                }
+                if c == '$' && j + 1 < chars.len() && chars[j + 1] == '{' {
+                    match end_of_braces(chars, j + 1) {
+                        Some(close) => {
+                            j = close + 1;
+                            continue;
+                        }
+                        None => return None,
+                    }
+                }
+                match c {
+                    '\'' | '"' => quote = Some(c),
+                    '(' => depth += 1,
+                    ')' => {
+                        // `depth` is at least 1 here because `open`
+                        // indexes a `(`; subtracting without checking
+                        // would panic in the debug profile the PR gate
+                        // runs precisely so an overflow is visible.
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            return Some(j);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Index of the `}` closing the `${...}` opened at `open`, which
+/// indexes the `{`, or `None` if it is never closed.
+///
+/// Brace expansions nest — `${x:-${y}}` is legal — so this counts
+/// braces the way [`end_of_substitution`] counts parentheses, and for
+/// the same reason: a `}` belonging to an inner expansion is not the
+/// outer one's close.
+///
+/// Quoting inside `${...}` is NOT tracked, and the limit is stated
+/// rather than implied. The expansion's own grammar allows a quoted
+/// word in the default value, so `${x:-"}"}` would close early here.
+/// No workflow in this constellation writes one, and the effect is to
+/// end the outer span early, which drops a gate rather than inventing
+/// one — the direction this file declares as safe.
+fn end_of_braces(chars: &[char], open: usize) -> Option<usize> {
+    debug_assert_eq!(chars.get(open), Some(&'{'), "open must index the brace");
+    let mut depth = 0usize;
+    let mut j = open;
+    while j < chars.len() {
+        // A NESTED SPAN'S CONTENTS ARE DATA, WHICH IS THE SAME RULE ONE
+        // LAYER DOWN. This counted every `{` and `}`, so a literal
+        // brace inside a command substitution -- where it is an
+        // ordinary argument character -- read as another expansion
+        // level, the closing `}` never brought the depth back to zero,
+        // this answered `None`, `shell_commands` treated the span as
+        // unterminated and dropped the rest of the line, and an `&&`
+        // chain that did NOT end the step looked as though it did:
+        //
+        //   cargo test --locked --lib && echo ${x:-$(echo {)} ; true
+        //
+        // bash exits 0 whether the suite passes or fails -- the
+        // `; true` swallows it -- and the guard counted it as the gate.
+        // Measured both ways with `bash -e -c`; and
+        // `echo "${x:-$(echo {)}"` prints `{`, so the brace really is
+        // data.
+        //
+        // `braces_no_nesting` passing was never evidence this was
+        // right: it shows the depth counter does something, not that it
+        // is correct on a brace that is not an expansion.
+        if chars[j] == '$' && j + 1 < chars.len() && chars[j + 1] == '(' {
+            match end_of_substitution(chars, j + 1) {
+                Some(close) => {
+                    j = close + 1;
+                    continue;
+                }
+                None => return None,
+            }
+        }
+        if chars[j] == '`' {
+            match end_of_backticks(chars, j) {
+                Some(close) => {
+                    j = close + 1;
+                    continue;
+                }
+                None => return None,
+            }
+        }
+        // ONLY `${` OPENS A LEVEL, apart from the opening brace this
+        // was called on. A bare `{` elsewhere is data.
+        if chars[j] == '$' && j + 1 < chars.len() && chars[j + 1] == '{' {
+            depth += 1;
+            j += 2;
+            continue;
+        }
+        match chars[j] {
+            '\\' if j + 1 < chars.len() => {
+                j += 1;
+            }
+            '{' if j == open => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Index of the backtick closing the span opened at `open`, or `None`.
+///
+/// Same blindness, same direction: inside backticks a `\` escapes the
+/// next character, so `` `echo a\` ; false` `` is ONE substitution and
+/// its status is swallowed — measured, `exit 0`. Stopping at the escaped
+/// backtick resumed tokenising inside the span and read the `false` as a
+/// top-level command, counting a suite whose failure nothing sees.
+///
+/// Quoting is deliberately NOT tracked here. Backtick spans nest quotes
+/// and escapes in a way that needs its own grammar, no workflow in this
+/// constellation writes one, and an untested branch in a guard is worth
+/// less than a stated limit. The escape is handled because it is the
+/// spelling that produces a FALSE PASS.
+fn end_of_backticks(chars: &[char], open: usize) -> Option<usize> {
+    debug_assert_eq!(chars.get(open), Some(&'`'), "open must index the backtick");
+    let mut j = open + 1;
+    while j < chars.len() {
+        if chars[j] == '\\' && j + 1 < chars.len() {
+            j += 2;
+            continue;
+        }
+        if chars[j] == '`' {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// One shell line split into the commands it invokes, each with the
+/// separator that follows it, and with the contents of quoted spans
+/// dropped.
+///
+/// It is not a shell. It knows four things: the separators above; that
+/// whitespace divides words; that what sits inside `'` or `"` is DATA
+/// rather than a word; and that an `&` right after `>` or `<` is part
+/// of a redirection (`2>&1`) rather than a separator.
+///
+/// The quoting rule is the whole difference between running a command
+/// and printing it:
+///
+///     cargo test --locked --lib      -> [["cargo", "test", ...]]
+///     echo "cargo test --locked"     -> [["echo", ""]]
+///
+/// The characters are the same and the substring match that used to
+/// stand here could not tell them apart.
+///
+/// OVER-STRICT IS THE SAFE DIRECTION, as everywhere else in this file:
+/// a shape it fails to recognise makes the guard refuse a correct
+/// workflow, loudly, with the command quoted. The other way round is a
+/// gate that went blind and said nothing.
+fn shell_commands(line: &str) -> Vec<(Vec<String>, Sep)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out: Vec<(Vec<String>, Sep)> = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+
+    macro_rules! end_word {
+        () => {
+            if started {
+                words.push(std::mem::take(&mut word));
+                started = false;
+            }
+        };
+    }
+
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            // Inside a quoted span every character is data, including a
+            // separator: `echo "a && cargo test"` is one command.
+            //
+            // A BACKSLASH INSIDE `"` ESCAPES THE NEXT CHARACTER, and
+            // without this the span ended at the first `\"`:
+            // `echo "a \" && cargo test"` split where the shell does
+            // not, and the second half read as a command being run. In
+            // `'` there are no escapes at all -- a backslash is data --
+            // which is why this is conditional on the quote character.
+            if q == '"' && c == '\\' && i + 1 < chars.len() {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        // A COMMAND SUBSTITUTION SWALLOWS ITS COMMAND'S STATUS, so what
+        // is inside one is data exactly as a quoted span is.
+        // `$(` and `)` used to fall into the separator arm below and
+        // become `Sep::Semi`, so `echo $(cargo test --locked --lib)`
+        // parsed as three commands with the inner one looking
+        // status-read. Measured: `bash -e -c 'echo $(false); echo R'`
+        // exits 0 and prints R -- only `echo`'s status is read.
+        //
+        // A BARE `( … )` SUBSHELL IS NOT THIS. Its status IS read, so it
+        // keeps falling through to the separator arm.
+        // `<( … )` AND `>( … )` ARE THE SAME SWALLOWING. A process
+        // substitution hands the command a file name to read, and the
+        // command's own status is all the line reports. Measured:
+        //
+        //   bash -e -c 'cat <(false)'          exit 0
+        //   bash -e -c 'cat <(false); echo R'  exit 0, R printed
+        //
+        // Only `$(` was recognised, so `cat <(cargo test --locked
+        // --all-targets)` split at the `(` into a `cat <` command and a
+        // `cargo test` one that looked status-read -- and the guard
+        // counted a suite whose failure nothing could see.
+        //
+        // FINDING THE END OF THE SPAN IS ITSELF SHELL PARSING, and the
+        // first version of this counted bare parentheses. See
+        // [`end_of_substitution`]: a `\)` or a `")"` inside the span is
+        // data, and taking either for the close resumed tokenising in
+        // the middle of a span the shell had not left.
+        if matches!(c, '$' | '<' | '>') && i + 1 < chars.len() && chars[i + 1] == '(' {
+            started = true;
+            i = match end_of_substitution(&chars, i + 1) {
+                Some(close) => close + 1,
+                // Unterminated: the shell would not accept this line at
+                // all, and there is no command after it to read.
+                None => chars.len(),
+            };
+            continue;
+        }
+        if c == '`' {
+            started = true;
+            i = match end_of_backticks(&chars, i) {
+                Some(close) => close + 1,
+                None => chars.len(),
+            };
+            continue;
+        }
+        // A `${...}` EXPANSION IS DATA HERE TOO, and this site was
+        // missed when the same rule went into `end_of_substitution`: a
+        // fix applied one function away and not applied here. `$` and
+        // `{` were ordinary word characters, so the `)` in
+        //
+        //   cargo test --locked --lib && echo ${x:+)}
+        //
+        // fell into the separator arm below and split the line. The
+        // `&&` chain then no longer ENDED the step, which is this
+        // file's rule for whether an `&&` list's failure is read, so
+        // the suite's failure read as swallowed and a real gate was
+        // dropped. Measured: `bash -e -c 'x=1; false && echo ${x:+)}'`
+        // exits 1 and the `true` spelling exits 0, so the status is
+        // read.
+        if c == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+            started = true;
+            i = match end_of_braces(&chars, i + 1) {
+                Some(close) => close + 1,
+                None => chars.len(),
+            };
+            continue;
+        }
+        match c {
+            '\\' if i + 1 < chars.len() => {
+                // Outside quotes a backslash escapes the next character,
+                // so `echo a\&\& b` is one command, not two.
+                word.push(chars[i + 1]);
+                started = true;
+                i += 2;
+            }
+            '\'' | '"' => {
+                quote = Some(c);
+                started = true;
+                i += 1;
+            }
+            '&' | '|' | ';' | '(' | ')' => {
+                // `2>&1` and `>&2`: an `&` bound to a redirection is
+                // part of the word, and the command's status is still
+                // read.
+                if c == '&' && started && (word.ends_with('>') || word.ends_with('<')) {
+                    word.push(c);
+                    i += 1;
+                    continue;
+                }
+                let doubled = i + 1 < chars.len() && chars[i + 1] == c;
+                let sep = match (c, doubled) {
+                    ('&', true) => Sep::And,
+                    ('&', false) => Sep::Amp,
+                    ('|', true) => Sep::Or,
+                    ('|', false) => Sep::Pipe,
+                    _ => Sep::Semi,
+                };
+                end_word!();
+                if !words.is_empty() {
+                    out.push((std::mem::take(&mut words), sep));
+                }
+                i += if doubled && c != ';' { 2 } else { 1 };
+            }
+            c if c.is_whitespace() => {
+                end_word!();
+                i += 1;
+            }
+            _ => {
+                word.push(c);
+                started = true;
+                i += 1;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    if !words.is_empty() {
+        out.push((words, Sep::End));
+    }
+    out
+}
+
+/// The arguments of a `cargo test` invocation on this line, or `None`
+/// if the line does not invoke one.
+///
+/// The scan used to ask `command.contains("cargo test")`, and a line
+/// that only PRINTS the command satisfied it:
+///
+///     echo "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib"
+///
+/// That one line met both of this file's workflow assertions -- the
+/// debug run and the handshake -- with no debug run behind either. A
+/// check whose result does not depend on the thing it exists to detect
+/// is this constellation's named defect, found inside a guard written
+/// to prevent it.
+///
+/// Leading `NAME=value` assignments and an `env` prefix are stepped
+/// over, because `EXPECT_OVERFLOW_CHECKS=1 cargo test …` is exactly the
+/// spelling this guard is looking for; so is a `+toolchain` selector
+/// between `cargo` and its subcommand. A wrapper -- `sudo`, `xargs`, a
+/// script -- is not recognised and the command does not count, which is
+/// the strict direction.
+fn cargo_test_arguments(words: &[String]) -> Option<Vec<&str>> {
+    let mut words = words
+        .iter()
+        .map(String::as_str)
+        .skip_while(|w| *w == "env" || (!w.starts_with('-') && w.contains('=')));
+    let program = words.next()?;
+    if program != "cargo" && !program.ends_with("/cargo") {
+        return None;
+    }
+    let mut rest = words.skip_while(|w| w.starts_with('+'));
+    if rest.next()? != "test" {
+        return None;
+    }
+    // A REDIRECTION IS NOT AN ARGUMENT. `2>&1` would otherwise read as
+    // a bare test-name filter and disqualify a run that is fine, and a
+    // separate `>` takes the following word with it.
+    let mut arguments = Vec::new();
+    let mut argument_is_a_redirection_target = false;
+    for word in rest {
+        if argument_is_a_redirection_target {
+            argument_is_a_redirection_target = false;
+            continue;
+        }
+        if word.contains('>') || word.contains('<') {
+            argument_is_a_redirection_target = word.ends_with('>') || word.ends_with('<');
+            continue;
+        }
+        arguments.push(word);
+    }
+    Some(arguments)
+}
+
+/// Cargo options that take their value as the NEXT argument.
+///
+/// Needed only to tell an option's value from a bare test-name filter:
+/// `--features qemu-validation` is not a filter and
+/// `cargo test --locked qemu` is.
+const OPTIONS_TAKING_A_VALUE: [&str; 18] = [
+    "-p",
+    "--package",
+    "--exclude",
+    "-F",
+    "--features",
+    "--target",
+    "--target-dir",
+    "--manifest-path",
+    "--profile",
+    "--test",
+    "--bin",
+    "--example",
+    "--bench",
+    "-j",
+    "--jobs",
+    "--message-format",
+    "--color",
+    "--config",
+];
+
+/// Whether these arguments select something OTHER than the crate's
+/// library unit tests, where the overflow probe lives.
+///
+/// `--test <name>` builds one integration target and no library unit
+/// tests. Several repositories here run a cross-validation suite that
+/// way, in its own job, beside the real one.
+///
+/// This used to be `command.contains("--test ")`, which is one of that
+/// option's two spellings, and which said nothing at all about `--doc`,
+/// `--no-run`, `--bins`, or a bare filter. So four different one-line
+/// edits each left the guard green with the probe unbuilt or unrun --
+/// `--no-run` most starkly, since it compiles and executes nothing.
+///
+/// THE ANSWER IS TO COMPARE THE ARGUMENTS, NOT TO WIDEN THE SUBSTRING.
+/// The trailing space in the old match was doing real work: `--tests`
+/// DOES build the library unit tests and contains `--test`, so dropping
+/// the space would have excluded a run that genuinely satisfies this
+/// guard. Whole arguments answer both spellings and the `--tests` near
+/// miss at once, with no space left load-bearing.
+///
+/// Everything after a bare `--` belongs to the test harness, not to
+/// cargo -- `-- --test-threads=1` selects no target -- so the walk
+/// stops there. A filter passed to the harness that way would still
+/// narrow the run; that is not covered, and the comment says so rather
+/// than the code implying otherwise.
+fn omits_the_library_unit_tests(arguments: &[&str]) -> bool {
+    let cargo_arguments = arguments.iter().take_while(|a| **a != "--");
+    let mut expecting_a_value = false;
+    for argument in cargo_arguments {
+        if expecting_a_value {
+            expecting_a_value = false;
+            continue;
+        }
+        if OPTIONS_TAKING_A_VALUE.contains(argument) {
+            // `--test` and friends disqualify whether or not the name
+            // is attached, so answer before consuming the value.
+            expecting_a_value = true;
+        }
+        let selects_elsewhere = [
+            "--test",
+            "--doc",
+            "--no-run",
+            "--bin",
+            "--example",
+            "--bench",
+        ]
+        .iter()
+        .any(|o| *argument == *o || argument.starts_with(&format!("{o}=")))
+            || ["--bins", "--examples", "--benches"].contains(argument);
+        if selects_elsewhere {
+            return true;
+        }
+        // A bare word is a test-name filter, which runs only the tests
+        // matching it -- the probe among the ones it may exclude.
+        if !argument.starts_with('-') {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the shell reads this command's exit status.
+///
+/// Nothing here used to look at status handling at all, so
+/// `cargo test --locked --all-targets || true` was matched, counted as
+/// gating, and gated nothing: the job goes green with the probe
+/// failing. A pipe and a trailing `&` are the same edit in other
+/// spellings.
+///
+/// This file already enumerates two levels of the same defect -- a
+/// step's `if:` and `continue-on-error:`, and a job's. Suppression
+/// inside the command is the third, and it was not on the list.
+///
+/// WHICH SEPARATORS DISCARD A STATUS IS MEASURED, NOT REASONED.
+/// Actions runs a `run:` block as `bash -e` with no `pipefail`, and
+/// under that shell:
+///
+/// ```text
+/// bash -e -c 'false; echo REACHED'  prints nothing, exit 1  READ
+/// bash -e -c 'false && echo x'                     exit 1   READ
+/// bash -e -c 'false || true'                       exit 0   discarded
+/// bash -e -c 'false | cat'                         exit 0   discarded
+/// bash -e -c 'false &'                             exit 0   discarded
+/// bash -e -c 'set +e; false; echo REACHED'  prints, exit 0  discarded
+/// ```
+///
+/// So `;` belongs with `&&`. The first version of this rule refused
+/// it, reasoning that the line's status becomes the next command's --
+/// true without `-e`, false with it, and the sort of claim that has to
+/// be run rather than thought about.
+///
+/// `set +e` is the caller's to handle, because it disqualifies the
+/// whole block rather than one line.
+///
+/// It stays STRICTER than bash in two places, and both are stated
+/// rather than accidental:
+///
+/// - `cargo test … & wait $!` does propagate the failure (measured:
+///   exit 1) and is refused anyway, because recognising it means
+///   tracking which job `$!` names;
+/// - `cargo test --locked --all-targets && echo ok | tee log` is
+///   refused because the tail contains a `Pipe`, and bash reads that
+///   status: `|` binds tighter than `&&`, so the pipeline is the last
+///   member of the list rather than something after it. MEASURED:
+///   `bash -e -c 'false && echo ok | tee /dev/null'` exits 1.
+///   `grep -cE 'cargo test.*&&.*\|'` is 0 in all six copies' `ci.yml`,
+///   so nothing hits it today; fixing it means telling a pipeline
+///   INSIDE a list from one that follows it, which is a change to the
+///   tokenizer rather than to this rule.
+///
+/// Refusing a correct workflow loudly is this file's declared
+/// direction; passing a broken one silently is the defect it exists
+/// for.
+fn status_is_read(
+    commands: &[(Vec<String>, Sep)],
+    index: usize,
+    is_last_command_line: bool,
+) -> bool {
+    let tail = &commands[index..];
+    if !tail
+        .iter()
+        .all(|(_, sep)| matches!(sep, Sep::End | Sep::And | Sep::Semi))
+    {
+        return false;
+    }
+    // AN `&&` LIST ONLY CARRIES ITS FAILURE IF IT ENDS THE LINE, and
+    // this cost a measurement to get right. `set -e` exempts a command
+    // that is part of an `&&` list from aborting the shell -- and the
+    // list's own non-zero status does not abort it either, so whatever
+    // follows the list runs and its status becomes the line's:
+    //
+    //   bash -e -c 'false && echo x'                exit 1   READ
+    //   bash -e -c 'false && echo x; echo REACHED'  exit 0   DISCARDED
+    //   bash -e -c 'false && echo x && echo y'      exit 1   READ
+    //
+    // So `cargo test --locked --lib && echo ok; echo done` is a gate
+    // that cannot fail, and the rule above -- which asked only that no
+    // `||`, `|` or `&` follow -- counted it as read.
+    //
+    // A NEWLINE ENDS A COMMAND THE SAME WAY `;` DOES, and this rule
+    // could not see one. `runs_with_overflow_checks` calls this per
+    // line, so "ends the line" was the whole test -- and a `run: |`
+    // block is the spelling a workflow is actually written in:
+    //
+    //   run: |
+    //     cargo test --locked --all-targets && echo done
+    //     echo "second line"
+    //
+    // The `&&` list ends its own line, the tail is `[And, End]`, and
+    // the step exits 0 with the suite red. Measured:
+    // `bash -e -c $'false && echo x\necho R'` exits 0 and prints R,
+    // exactly as the `;` spelling does.
+    //
+    // `an_and_list_that_does_not_end_the_line_has_its_failure_swallowed`
+    // is named for this defect and reaches only the `;` half: both of
+    // its inputs put the following command on the SAME line. So the
+    // rule needs to know whether anything runs after this LINE too,
+    // which is a fact about the script rather than about the line.
+    if tail[0].1 == Sep::And {
+        return is_last_command_line
+            && tail
+                .iter()
+                .all(|(_, sep)| matches!(sep, Sep::And | Sep::End));
+    }
+    true
+}
+
 /// Every `cargo test` invocation in a shell script that would be
-/// compiled with overflow checks on.
+/// compiled with overflow checks on AND whose failure would be read.
 ///
 /// The argument is the SHELL text of one step's `run:`, not YAML.
 /// [`parse_workflow`] has already turned the workflow into a structure,
 /// so a YAML comment can no longer reach this function at all -- that
-/// half of the old scan is now the parser's job, by construction.
+/// half of the old scan is now the parser's job, by construction. Shell
+/// comments still reach here, and [`command_lines`] is the one place
+/// they are removed.
 ///
-/// The `#` handling below is still load bearing, because what does
-/// reach here is shell, and shell has comments of its own inside a
-/// `run: |` block.
-///
-/// Four things disqualify a command, and each one is a way the guard
+/// Seven things disqualify a command, and each one is a way the guard
 /// could otherwise be satisfied by something that does not actually
-/// build in debug:
+/// build the library in debug and fail loudly:
 ///
-/// - it is a shell comment;
-/// - it is an inline trailing comment on an otherwise-`--release` line;
+/// - the script disables `set -e`, which makes every command in it
+///   advisory ([`disables_errexit`]);
+/// - it is a shell comment, or an inline trailing comment on an
+///   otherwise-`--release` line ([`command_lines`]);
+/// - it does not invoke `cargo test` at all, only mentions it
+///   ([`cargo_test_arguments`]);
 /// - it passes `--release`, or names a profile explicitly;
 /// - it sets a `CARGO_PROFILE_*` variable, which can turn overflow
-///   checks off for the dev or test profile from outside the manifest.
+///   checks off for the dev or test profile from outside the manifest;
+/// - it selects something other than the library unit tests
+///   ([`omits_the_library_unit_tests`]);
+/// - its exit status is discarded ([`status_is_read`]).
 ///
 /// A `cargo build` is not a `cargo test` and is not considered, nor is
 /// any step that invokes no cargo at all.
 fn runs_with_overflow_checks(script: &str) -> Vec<String> {
-    script
-        .lines()
-        .filter_map(|raw| {
-            let line = raw.trim_start();
-            if line.starts_with('#') {
-                return None;
+    let lines = command_lines(script);
+    if lines.iter().any(|line| disables_errexit(line)) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let last_line = lines.len().saturating_sub(1);
+    for (line_index, line) in lines.iter().enumerate() {
+        if line.contains("--release") || line.contains("--profile") {
+            continue;
+        }
+        if line.contains("CARGO_PROFILE_") {
+            continue;
+        }
+        let commands = shell_commands(line);
+        for (index, (words, _)) in commands.iter().enumerate() {
+            let Some(arguments) = cargo_test_arguments(words) else {
+                continue;
+            };
+            if omits_the_library_unit_tests(&arguments) {
+                continue;
             }
-            let command = line.split(" #").next().unwrap_or(line).trim();
-            if !command.contains("cargo test") {
-                return None;
+            // Whether an `&&` chain's failure reaches the step depends
+            // on nothing running after it -- on a later line included.
+            if !status_is_read(&commands, index, line_index == last_line) {
+                continue;
             }
-            if command.contains("--release") || command.contains("--profile") {
-                return None;
-            }
-            if command.contains("CARGO_PROFILE_") {
-                return None;
-            }
-            // `--test <name>` builds one integration target and no
-            // library unit tests, so it does not cover the crate's
-            // arithmetic. Several repositories here run a
-            // cross-validation suite that way, in its own job, beside
-            // the real one.
-            //
-            // THE TRAILING SPACE PROTECTS `--tests`, NOT `--all-targets`.
-            // `--tests` DOES build the library unit tests and contains
-            // `--test` but not `--test `, so dropping the space would
-            // exclude a run that genuinely satisfies this guard:
-            //   "--test " in "--all-targets"  -> false
-            //   "--test " in "--tests"        -> false   (so it counts)
-            //   "--test"  in "--tests"        -> true    (so it would not)
-            if command.contains("--test ") {
-                return None;
-            }
-            Some(command.to_string())
-        })
-        .collect()
+            out.push(line.to_string());
+            break;
+        }
+    }
+    out
 }
 
 /// WHAT ELSE DECIDES WHETHER A STEP GATES.
@@ -460,12 +1270,167 @@ fn scan_steps(workflow: &str, gating: bool, select: fn(&str) -> Vec<String>) -> 
 /// where an inline `VAR=1 cargo test` prefix is a PowerShell syntax
 /// error. A guard that read only the command would refuse the correct
 /// workflow on every cross-platform crate in this constellation.
+///
+/// THE INLINE HALF READS COMMANDS, NOT THE RAW BLOCK. It used to be
+/// `step.run.contains(...)`, and `step.run` is the block verbatim --
+/// comments included -- while the other half of the scan strips them.
+/// Two readers of one text with two grammars, so a step could be armed
+/// by a line the shell never executes:
+///
+///     run: |
+///       # EXPECT_OVERFLOW_CHECKS=1 -- see ci_profile.rs
+///       cargo test --locked --all-targets
+///
+/// Both workflow assertions passed on that and the process got no
+/// variable at all, leaving the runtime probe to return without
+/// asserting anything. [`command_lines`] is now the single grammar.
 fn step_declares_the_handshake(step: &Step) -> bool {
-    step.run.contains("EXPECT_OVERFLOW_CHECKS=1")
+    command_lines(&step.run)
+        .iter()
+        .any(|line| line_assigns_the_handshake(line))
         || step
             .env
             .iter()
             .any(|entry| entry == "EXPECT_OVERFLOW_CHECKS=1")
+}
+
+/// Whether a shell line ASSIGNS the handshake, rather than mentioning
+/// it.
+///
+/// A `contains` over the line stood here, and `command_lines` had
+/// already removed comments -- but a printed mention is not a comment:
+///
+///     echo "EXPECT_OVERFLOW_CHECKS=1"
+///     cargo test --locked --all-targets
+///
+/// That armed the whole step, `gating_runs_that_prove_the_build_traps`
+/// then counted the `cargo test` beneath it as proving the build traps,
+/// and the process received no variable at all -- so the runtime probe
+/// returned without asserting anything. The same defect as the comment
+/// grammar it replaced, one grammar later.
+///
+/// AN ASSIGNMENT IS A PREFIX OF A COMMAND. Every word before it must be
+/// another `NAME=value` or `env`, which is exactly the shape
+/// [`cargo_test_arguments`] steps over. `echo EXPECT_OVERFLOW_CHECKS=1`
+/// is therefore not one: `echo` is not an assignment.
+///
+/// `export` is accepted with it, because `export VAR=1` on its own line
+/// followed by `cargo test` is a real spelling and refusing it would
+/// refuse a correct workflow. `set` is not: `set` does not assign.
+/// Whether one tokenised command puts the handshake into an
+/// ENVIRONMENT a later process receives.
+///
+/// # AN ASSIGNMENT ON ITS OWN EXPORTS NOTHING
+///
+/// This returned true on seeing the handshake anywhere in a command's
+/// assignment prefix, and a standalone
+///
+/// ```text
+/// EXPECT_OVERFLOW_CHECKS=1
+/// cargo test --locked --lib
+/// ```
+///
+/// is a prefix with no command after it: bash sets a SHELL variable
+/// that the `cargo test` on the next line never sees. So the guard
+/// reported a probe that could not have run — the recurring defect,
+/// inside the guard written to close it. The doc this replaces reasoned
+/// about `export VAR=1` and about `echo VAR=1` and was silent on
+/// assignment-alone, which is how it survived five reviews.
+///
+/// Three conditions, and the defect was the absence of the second:
+///
+/// 1. **Name shape.** [`is_assignment`] requires a name that is a legal
+///    shell identifier, so `1abc=x` is not an assignment and neither is
+///    a bare `=x`.
+/// 2. **Leading position, WITH A COMMAND AFTER IT.** A prefix
+///    assignment is exported to the command it prefixes and to nothing
+///    else, so with no command there is nothing to export to.
+/// 3. **Or an exporting builtin**, which puts it in the shell's own
+///    environment and so reaches every later command.
+///
+/// # THE TEMPTING FIX IS TO REQUIRE `export`, AND IT WOULD BE WRONG
+///
+/// `EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib` is the spelling
+/// this repository's own workflow uses and the one the guard exists to
+/// accept. `a_real_assignment_beside_a_run_on_one_line_still_counts`
+/// and `every_spelling_that_really_assigns_it_still_arms_the_step` are
+/// the acceptance arms, and `require_export` is the mutation that shows
+/// what requiring it costs.
+///
+/// # WHAT IS DELIBERATELY STILL REFUSED
+///
+/// `declare -x` and `typeset -x` do export — measured in
+/// `rust-img-vhdx`'s `assigns_the_handshake`, which is the one copy in
+/// the constellation that built that table:
+///
+/// ```text
+/// export X=1      child sees it: 1     declare -x X=1  child sees it: 1
+/// declare X=1     child sees it: 0     typeset -x X=1  child sees it: 1
+/// typeset X=1     child sees it: 0
+/// readonly X=1    child sees it: 0
+/// ```
+///
+/// This file recognises only `export`, so the `-x` spellings are
+/// REFUSED. That is the over-strict direction and it is left alone
+/// deliberately: recognising them widens what counts as armed, which is
+/// the unsafe direction, and no workflow here writes one. The four
+/// non-exporting spellings are already refused, because none of them is
+/// `export`, `env` or an assignment.
+fn line_assigns_the_handshake(line: &str) -> bool {
+    shell_commands(line)
+        .iter()
+        .any(|(words, _)| command_assigns_the_handshake(words))
+}
+
+const HANDSHAKE: &str = "EXPECT_OVERFLOW_CHECKS=1";
+
+fn command_assigns_the_handshake(words: &[String]) -> bool {
+    // An exporting builtin reaches every later command, so where the
+    // assignment sits among its arguments does not matter. `export`
+    // with no arguments exports nothing, which `words[1..]` gives for
+    // free.
+    if words.first().map(String::as_str) == Some("export") {
+        return words[1..].iter().any(|word| word == HANDSHAKE);
+    }
+
+    // Otherwise it has to be an assignment PREFIX, and a prefix is
+    // exported to the command it prefixes.
+    let mut saw = false;
+    let mut at = 0;
+    while at < words.len() {
+        let word = words[at].as_str();
+        if word == "env" {
+            at += 1;
+            continue;
+        }
+        if is_assignment(word) {
+            if word == HANDSHAKE {
+                saw = true;
+            }
+            at += 1;
+            continue;
+        }
+        // The program name. Anything matching after it is an argument
+        // rather than an assignment.
+        break;
+    }
+    // AND A COMMAND FOLLOWS. `at == words.len()` means the whole
+    // command was assignments, which is the defect this function was
+    // changed for.
+    saw && at < words.len()
+}
+
+/// `NAME=value`, the shape a shell reads as an assignment rather than a
+/// program name.
+fn is_assignment(word: &str) -> bool {
+    match word.split_once('=') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+        }
+        None => false,
+    }
 }
 
 /// The run commands of steps that run in debug AND actually gate a
@@ -500,10 +1465,21 @@ fn gating_runs_that_prove_the_build_traps(workflow: &str) -> Vec<String> {
 /// a step is a misconfiguration and it fails loudly rather than
 /// quietly: the checks are legitimately off in release, so the
 /// assertion the handshake arms would fire there every time.
+/// THE SECOND CALL SITE OF THE SAME QUESTION, and it needs its own
+/// witness. `step_declares_the_handshake` asks it of a step and this
+/// asks it of one command line; fixing only the first left this one a
+/// `contains`, and the suite stayed green because no test drove this
+/// path with a printed mention on the same line as a real run:
+///
+///     echo "EXPECT_OVERFLOW_CHECKS=1" && cargo test --locked --lib
+///
+/// One line, so `runs_with_overflow_checks` hands the whole thing back
+/// as the command, `contains` matched, and the run counted as proving
+/// the build traps while the process received no variable.
 fn debug_runs_that_prove_the_build_traps(script: &str) -> Vec<String> {
     runs_with_overflow_checks(script)
         .into_iter()
-        .filter(|command| command.contains("EXPECT_OVERFLOW_CHECKS=1"))
+        .filter(|command| line_assigns_the_handshake(command))
         .collect()
 }
 
@@ -776,6 +1752,65 @@ fn the_profile_that_cargo_test_builds_still_checks_for_overflow() {
 mod shell_scan {
     use super::runs_with_overflow_checks;
 
+    /// Whether a line's `cargo test` selects something other than the
+    /// library unit tests. A line-level wrapper so these tests read as
+    /// shell, the way the workflow does.
+    fn selects_away_from_the_library(line: &str) -> bool {
+        super::shell_commands(line)
+            .iter()
+            .filter_map(|(words, _)| super::cargo_test_arguments(words))
+            .any(|arguments| super::omits_the_library_unit_tests(&arguments))
+    }
+
+    /// A LINE THAT PRINTS THE COMMAND IS NOT A RUN.
+    ///
+    /// The scan asked whether the line CONTAINED "cargo test", so this
+    /// one satisfied both of the file's workflow assertions with
+    /// nothing behind them: the debug run and, because the same
+    /// characters carry `EXPECT_OVERFLOW_CHECKS=1`, the handshake too.
+    #[test]
+    fn an_echoed_command_is_not_a_run() {
+        for line in [
+            "echo \"EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\"",
+            "echo 'cargo test --locked --all-targets'",
+            "echo cargo test --locked --lib",
+            "printf '%s\\n' \"cargo test --locked --lib\"",
+            "echo \"running: cargo test\" && cargo build --locked",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} prints the command; it does not run it"
+            );
+        }
+    }
+
+    /// THE ACCEPTANCE HALF OF THE SAME CHANGE.
+    ///
+    /// Recognising the invocation rather than the substring must not
+    /// cost the spellings a real workflow uses. Each of these DOES
+    /// run the suite in debug and each must still be counted --
+    /// including the two where `cargo` is not the first word on the
+    /// line.
+    #[test]
+    fn the_spellings_that_do_invoke_cargo_test_still_count() {
+        for line in [
+            "cargo test --locked --all-targets",
+            "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+            "cd .. && cargo test --locked --lib",
+            "cargo test --locked --lib 2>&1",
+            "cargo test --locked --lib > test.log",
+            "cargo +stable test --locked --lib",
+            "env EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line} runs the suite in debug and must be counted"
+            );
+        }
+    }
+
     /// The trap this repository actually contains, in the form that
     /// still reaches this function. `ci.yml` documents the debug step
     /// by quoting the command, and a `run: |` block can carry the same
@@ -819,6 +1854,65 @@ EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib
             Vec::<String>::new(),
             "the command is --release; the comment after it is not a second run"
         );
+    }
+
+    /// A `#` THAT DOES NOT BEGIN A WORD IS NOT A COMMENT.
+    ///
+    /// The acceptance half of widening the comment rule from `" #"` to
+    /// the separator alphabet: a `#` inside a word, or inside quotes,
+    /// is data. Cutting there would truncate a real command and the
+    /// guard would refuse a correct workflow.
+    #[test]
+    fn a_hash_that_does_not_begin_a_word_is_not_a_comment() {
+        for line in [
+            "cargo test --locked --features a#b --all-targets",
+            "cargo test --locked --all-targets && echo \"done #1\"",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line:?} has no comment on it: the `#` is inside a word or a quoted span"
+            );
+        }
+    }
+
+    /// THE QUOTE TRACKING IN `comment_start`, WHICH NOTHING ELSE PINS.
+    ///
+    /// `a_hash_that_does_not_begin_a_word_is_not_a_comment` looks like
+    /// it covers this and does not: its quoted `#` sits AFTER the
+    /// `cargo test`, so cutting the line there still leaves the
+    /// invocation behind and the guard still counts it. The mechanism
+    /// survived deletion with every other test green.
+    ///
+    /// The witnessing input has to put the quoted `#` FIRST, so that
+    /// treating it as a comment removes the run:
+    ///
+    ///     echo "step # 1"; cargo test --locked --all-targets
+    ///
+    /// Without quote tracking the line is cut to `echo "step`, no
+    /// `cargo test` remains, and the guard REFUSES A CORRECT WORKFLOW.
+    /// That is the direction this one guards -- a false rejection, not
+    /// a false pass.
+    ///
+    /// It is asserted here rather than as a workflow because YAML ends
+    /// a plain scalar at ` #` itself, so the same line written as
+    /// `run: echo "step # 1"; ...` is refused before this function ever
+    /// sees it -- a different defect, and an easy way to measure the
+    /// wrong thing. Only a block scalar reaches here intact, and at
+    /// that point the shell text is what is under test.
+    #[test]
+    fn a_quoted_hash_before_the_run_does_not_cut_the_line_short() {
+        for line in [
+            "echo \"step # 1\"; cargo test --locked --all-targets",
+            "echo 'step # 1' && cargo test --locked --all-targets",
+            "printf '%s\\n' \"# not a comment\"; cargo test --locked --lib",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line:?} runs the suite: the `#` is inside quotes and ends nothing"
+            );
+        }
     }
 
     /// The inline-comment strip, which nothing else here pins. A real
@@ -876,6 +1970,157 @@ cargo build --locked --release
         );
     }
 
+    /// A COMMAND WHOSE FAILURE IS DISCARDED IS NOT A GATE.
+    ///
+    /// Nothing here looked at status handling, so a debug run with its
+    /// exit status thrown away was matched, counted as gating, and
+    /// gated nothing -- the job goes green with the probe failing.
+    /// This file already enumerates the same defect at two levels, a
+    /// step's `if:`/`continue-on-error:` and a job's; suppression
+    /// inside the command is the third.
+    ///
+    /// The pipe is the one worth reading twice. Actions runs a `run:`
+    /// block as `bash -e` with no `pipefail`, so the line's status is
+    /// the LAST stage's -- `tee` always succeeds.
+    #[test]
+    fn a_run_whose_status_is_discarded_does_not_count() {
+        for line in [
+            "cargo test --locked --all-targets || true",
+            "cargo test --locked --all-targets || echo 'ignored'",
+            "cargo test --locked --all-targets | tee test.log",
+            "cargo test --locked --all-targets &",
+            "set +e\ncargo test --locked --all-targets\n",
+            "set +o errexit\ncargo test --locked --all-targets\n",
+            "set +ex\ncargo test --locked --all-targets\n",
+            // The option name with the next command's punctuation
+            // glued to it. `split_whitespace` produced `errexit;`,
+            // which is not `errexit`, so the withdrawal was invisible
+            // and everything after it was counted as gating.
+            "set +o errexit; cargo test --locked --all-targets\n",
+            "set +o errexit&& cargo test --locked --all-targets\n",
+            "set +o errexit\ncargo test --locked --all-targets | tee log\n",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line:?} runs the suite and throws the answer away"
+            );
+        }
+    }
+
+    /// THE ACCEPTANCE HALF OF THE STATUS RULE.
+    ///
+    /// `&&` propagates a failure, `set -e` is the default rather than
+    /// something to opt into, and a redirection is not a separator --
+    /// the `&` in `2>&1` binds to the `>` before it. A status rule that
+    /// refused these would refuse most real workflows.
+    #[test]
+    fn a_run_whose_failure_still_ends_the_step_counts() {
+        for line in [
+            "cargo test --locked --all-targets",
+            "cargo test --locked --all-targets && echo ok",
+            "cd .. && cargo test --locked --all-targets && echo ok",
+            "cargo test --locked --all-targets 2>&1",
+            // `;` is NOT a discard under `bash -e`: the shell aborts
+            // before the next command runs. Measured, and the reason
+            // the first version of this rule was wrong.
+            "cargo test --locked --all-targets; echo done",
+            "cargo test --locked --all-targets ; true",
+            "set -euo pipefail\ncargo test --locked --all-targets\n",
+            // THE ACCEPTANCE HALF OF THE GLUED-PUNCTUATION RULE.
+            // `-o errexit` turns the option ON, and a `set +o errexit`
+            // that is only PRINTED withdraws nothing -- the tokenizer
+            // drops what is inside quotes, so the word is `echo`.
+            "set -o errexit; cargo test --locked --all-targets\n",
+            "echo \"set +o errexit\"\ncargo test --locked --all-targets\n",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line:?} fails the step when the suite fails"
+            );
+        }
+    }
+
+    /// SELECTIONS THAT BUILD OR RUN SOMETHING OTHER THAN THE LIBRARY.
+    ///
+    /// `--doc`, `--no-run` and a bare filter each leave the overflow
+    /// probe unbuilt or unrun while the old scan counted the line as
+    /// the required debug suite. `--no-run` is the starkest: it
+    /// compiles and executes nothing.
+    #[test]
+    fn a_selection_that_leaves_the_library_unit_tests_out_does_not_count() {
+        for line in [
+            "cargo test --locked --doc",
+            "cargo test --locked --no-run",
+            "cargo test --locked --bins",
+            "cargo test --locked --examples",
+            "cargo test --locked --bin some_tool",
+            "cargo test --locked --example inspect",
+            "cargo test --locked some_filter",
+            "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --features qemu-validation qemu",
+        ] {
+            assert!(
+                selects_away_from_the_library(line),
+                "{line} selects something other than the library unit tests"
+            );
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} does not build and run the library unit tests"
+            );
+        }
+    }
+
+    /// BOTH SPELLINGS OF `--test` ARE THE SAME OPTION.
+    ///
+    /// The scan matched the substring `"--test "`, so the `=` form was
+    /// invisible: a cross-validation job building one integration
+    /// target counted as a full debug run, and the real one could then
+    /// be deleted with this guard still green. Nothing noticed because
+    /// every such job here is written the long way today; the guard is
+    /// what stops the short way from being silently equivalent.
+    #[test]
+    fn an_equals_spelled_single_target_does_not_count_either() {
+        for line in [
+            "cargo test --locked --features qemu-validation --test=qemu_validation",
+            "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --test=some_oracle",
+            "cargo test --locked --test=\"qemu_validation\"",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} builds one integration target and no library unit tests"
+            );
+            assert!(
+                selects_away_from_the_library(line),
+                "{line} names a single integration target"
+            );
+        }
+    }
+
+    /// The acceptance half: options that merely START with `--test`
+    /// are not the option, and every one of these builds the library
+    /// unit tests.
+    #[test]
+    fn options_that_only_look_like_test_do_not_disqualify_a_run() {
+        for line in [
+            "cargo test --locked --tests",
+            "cargo test --locked --all-targets",
+            "cargo test --locked --lib -- --test-threads=1",
+        ] {
+            assert!(
+                !selects_away_from_the_library(line),
+                "{line} does not restrict the run to one integration target"
+            );
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line} builds the library unit tests and must be counted"
+            );
+        }
+    }
+
     /// A single integration target is not the crate's arithmetic.
     /// Several repositories here run a cross-validation suite as
     /// `--test <name>` in its own job, and counting it would let the
@@ -892,6 +2137,419 @@ cargo build --locked --release
                 "{line} builds one integration target and no library unit tests"
             );
         }
+    }
+
+    /// A COMMAND SUBSTITUTION SWALLOWS ITS COMMAND'S STATUS.
+    ///
+    /// `(` and `)` fell into the separator arm and became `Sep::Semi`,
+    /// so `echo $(cargo test --locked --lib)` parsed as three commands
+    /// with the inner one looking status-read. Measured:
+    /// `bash -e -c 'echo $(false); echo R'` exits 0 and prints R.
+    /// WHERE A SUBSTITUTION ENDS IS SHELL PARSING, NOT A PAREN COUNT.
+    ///
+    /// The scanner counted bare parentheses, so a `)` that the shell
+    /// treats as DATA ended the span early and tokenising resumed
+    /// inside a span the shell had not left. Every verdict below is
+    /// `bash -e -c` on that exact line, taken from bash rather than
+    /// from this file; `exit 0` means the status was swallowed, so the
+    /// suite is not a gate and must not be counted.
+    ///
+    /// | line | bash | must |
+    /// |---|---|---|
+    /// | `cat <(echo a\) ; false)` | 0 | not count |
+    /// | `cat <(echo "a)" ; false)` | 0 | not count |
+    /// | `cat <(echo 'a\)' ; false)` | 0 | not count |
+    /// | `` echo `echo a\` ; false` `` | 0 | not count |
+    /// | `cat <(echo "a)") ; false` | 1 | **count** |
+    /// | `cat <(echo 'a)') ; false` | 1 | **count** |
+    /// | `cat <(echo a\\) ; false` | 1 | **count** |
+    /// A NESTED SPAN'S PARENTHESES ARE ITS OWN — BACKTICKS.
+    ///
+    /// `end_of_substitution` tracked quotes and escapes and not nested
+    /// spans, so a `)` inside a nested backtick span closed the outer
+    /// `$( )` early; the unmatched backtick then ate the rest of the
+    /// line and a real gate was DROPPED. `bash -e -c` on the exact
+    /// line, `false` versus `true` for the suite: exits 1 and 0, so the
+    /// trailing status is read and this must COUNT.
+    #[test]
+    fn a_nested_backtick_does_not_close_the_outer_substitution() {
+        let line = "echo $(echo `echo x)`) ; cargo test --locked --lib";
+        assert_eq!(
+            runs_with_overflow_checks(line),
+            vec![line.to_string()],
+            "{line}: the `)` is inside a nested backtick span, so the substitution runs on \
+             and the cargo test after it is top-level"
+        );
+    }
+
+    /// THE SAME, FOR `${{...}}`, AND IT FAILS THE OTHER WAY.
+    ///
+    /// A `)` inside a brace expansion closed the outer substitution
+    /// early, so a suite that bash keeps INSIDE the substitution read
+    /// as top-level and a swallowed run was COUNTED. Measured:
+    /// `bash -e -c 'x=1; $(echo ${{x:+)}} ; false)'` and the same with
+    /// `true` both exit 0 — the inner status never reaches the line.
+    #[test]
+    fn a_brace_expansion_does_not_close_the_outer_substitution() {
+        assert_eq!(
+            runs_with_overflow_checks("$(echo ${x:+)} ; cargo test --locked --lib)"),
+            Vec::<String>::new(),
+            "the whole thing is inside `$( )`; the `)` belongs to the brace expansion"
+        );
+        // ACCEPTANCE: the same brace expansion with the suite OUTSIDE
+        // the substitution is a real gate and must still count.
+        let line = "echo $(echo ${x:+)}) ; cargo test --locked --lib";
+        assert_eq!(
+            runs_with_overflow_checks(line),
+            vec![line.to_string()],
+            "{line}: the substitution closes and the cargo test after it is top-level"
+        );
+        // AND THE MAIN TOKENISER SKIPS IT TOO, which is a second site
+        // for the same rule. `$` and `{` were ordinary word characters
+        // there, so this `)` became a separator, the `&&` chain stopped
+        // ending the step, and the suite's failure read as swallowed.
+        let line = "cargo test --locked --lib && echo ${x:+)}";
+        assert_eq!(
+            runs_with_overflow_checks(line),
+            vec![line.to_string()],
+            "{line}: the `)` belongs to the expansion, so the && list still ends the step"
+        );
+
+        // A LITERAL BRACE IS NOT AN EXPANSION LEVEL. `${x:-$(echo {)}`
+        // expands to `{` -- the brace is an ordinary argument
+        // character inside a command substitution. Counting it as a
+        // level left the span unterminated, `shell_commands` dropped
+        // the rest of the line, and the `&&` chain looked as though it
+        // ended the step. `bash -e -c 'x=1; false && echo
+        // ${x:-$(echo {)} ; true'` exits 0, and so does the `true`
+        // spelling: the `; true` swallows the suite's failure, so this
+        // must NOT count.
+        assert_eq!(
+            runs_with_overflow_checks("cargo test --locked --lib && echo ${x:-$(echo {)} ; true"),
+            Vec::<String>::new(),
+            "the `; true` swallows the failure; the brace inside the substitution is data"
+        );
+        // ACCEPTANCE: the same expansion with the chain really ending
+        // the step is a gate. `false && echo ${x:-$(echo {)}` exits 1
+        // and the `true` spelling 0.
+        let line = "cargo test --locked --lib && echo ${x:-$(echo {)}";
+        assert_eq!(
+            runs_with_overflow_checks(line),
+            vec![line.to_string()],
+            "{line}: the && chain ends the step, so the suite's failure is read"
+        );
+        // EVERY NESTED SHAPE THAT CARRIES A BRACE, each measured with
+        // `bash -e -c` in both spellings and each SWALLOWED by the
+        // `; true`, so none may count. Three arms of the fix are held
+        // by exactly one of these:
+        //
+        //   ${x:-{}              a literal `{` directly in the
+        //                        expansion; expands to `{`
+        //   ${x:-$(echo })}      a `}` inside a nested substitution;
+        //                        expands to `}`
+        //   ${x:-`echo }`}       a `}` inside nested backticks;
+        //                        expands to `}`
+        //   ${x:-$(echo ${y})}   an expansion inside a substitution
+        //                        inside an expansion; expands to `q`
+        for expansion in [
+            "${x:-{}",
+            "${x:-$(echo })}",
+            "${x:-`echo }`}",
+            "${x:-$(echo ${y})}",
+        ] {
+            let line = format!("cargo test --locked --lib && echo {expansion} ; true");
+            assert_eq!(
+                runs_with_overflow_checks(&line),
+                Vec::<String>::new(),
+                "{line}: the `; true` swallows the failure, so this is not the gate"
+            );
+        }
+
+        // AND THE ACCEPTANCE SIDE OF THE SAME NESTING, which is what
+        // holds the substitution skip specifically. Ending the span
+        // early at the `}` inside `$( )` leaves a stray `)` that reads
+        // as a separator, so the `&&` chain stops ending the step and a
+        // real gate is dropped. `bash -e -c 'x=; false && echo
+        // "${x:-$(echo })}"'` exits 1 and the `true` spelling 0.
+        for expansion in ["${x:-$(echo })}", "${x:-$(echo ${y})}"] {
+            let line = format!("cargo test --locked --lib && echo {expansion}");
+            assert_eq!(
+                runs_with_overflow_checks(&line),
+                vec![line.clone()],
+                "{line}: the && chain ends the step, so the suite's failure is read"
+            );
+        }
+
+        // And a literal brace in a bare substitution, no expansion at
+        // all, which is the same character in the simpler position.
+        assert_eq!(
+            runs_with_overflow_checks("cargo test --locked --lib && echo $(echo {) ; true"),
+            Vec::<String>::new(),
+            "a literal brace in a substitution does not change where the line ends"
+        );
+
+        // AND THEY NEST. `${x:-${y}z)}` expands to `qz)` in bash, so
+        // the `)` is the expansion's, and a scanner that stopped at the
+        // INNER `}` would resume at `z)}` and take that `)` for a
+        // separator -- which ends the `&&` chain early and drops a real
+        // gate. Measured: `bash -e -c 'y=q; false && echo ${x:-${y}z)}'`
+        // exits 1 and the `true` spelling exits 0.
+        let line = "cargo test --locked --lib && echo ${x:-${y}z)}";
+        assert_eq!(
+            runs_with_overflow_checks(line),
+            vec![line.to_string()],
+            "{line}: the nested expansion owns both braces and the `)`, so the && list              still ends the step"
+        );
+        assert_eq!(
+            runs_with_overflow_checks("$(echo ${x:-${y:+)}} ; cargo test --locked --lib)"),
+            Vec::<String>::new(),
+            "a nested brace expansion's braces are its own inside a substitution too"
+        );
+    }
+
+    #[test]
+    fn a_paren_the_shell_reads_as_data_does_not_end_a_substitution() {
+        for line in [
+            // THE FILED DEFECT, and it is the false-pass direction: the
+            // escaped `)` looked like the close, so the `cargo test`
+            // after it parsed as a top-level command whose status is
+            // read -- while bash keeps it inside the substitution and
+            // throws its status away.
+            "cat <(echo a\\) ; cargo test --locked --lib)",
+            // The same cause quoted. Correct today only by accident:
+            // the stray `\"` happened to swallow the rest of the line.
+            "cat <(echo \"a)\" ; cargo test --locked --lib)",
+            // Inside `'` a backslash is DATA, so `\\)` does not even
+            // escape -- the `)` is quoted and the span runs on.
+            "cat <(echo 'a\\)' ; cargo test --locked --lib)",
+            // `$( )` is the same span with a different opener.
+            "echo $(echo a\\) ; cargo test --locked --lib)",
+            "echo $(echo \"a)\" ; cargo test --locked --lib)",
+            // And the same `'a\'` shape with the suite INSIDE: bash
+            // closes the quote, so the cargo test is still in the
+            // substitution. `exit 0`, measured.
+            "cat <(echo 'a\\' ; cargo test --locked --lib)",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line}: bash keeps the cargo test inside the substitution and discards \
+                 its status, so counting it would count a probe that does not gate the step"
+            );
+        }
+    }
+
+    /// A BACKSLASH EXTENDS A BACKTICK SPAN TOO, and this one was not in
+    /// the report -- the backtick skip had the identical blindness and
+    /// the identical false-pass direction. Measured:
+    /// `bash -e -c 'echo `echo a\` ; false`'` exits 0.
+    #[test]
+    fn an_escaped_backtick_does_not_end_a_backtick_substitution() {
+        let line = "echo `echo a\\` ; cargo test --locked --lib`";
+        assert_eq!(
+            runs_with_overflow_checks(line),
+            Vec::<String>::new(),
+            "{line}: the escaped backtick keeps the cargo test inside the substitution"
+        );
+    }
+
+    /// THE ACCEPTANCE HALF, AND IT IS THE HALF A `\)` SPECIAL CASE
+    /// WOULD HAVE LEFT BROKEN.
+    ///
+    /// These three end their substitution properly and leave a real
+    /// top-level `cargo test` whose failure DOES end the step. A
+    /// scanner that mis-closes early makes the guard refuse a correct
+    /// workflow, which is the direction this file's own history warns
+    /// about and the direction the quoted spelling actually failed in.
+    #[test]
+    fn a_substitution_that_really_closes_still_leaves_a_gate() {
+        for line in [
+            // Was refused before this change: the scanner closed at the
+            // quoted `)` and the leftover `"` ate the rest of the line.
+            "cat <(echo \"a)\") ; cargo test --locked --lib",
+            "cat <(echo 'a)') ; cargo test --locked --lib",
+            // `\\` is an escaped BACKSLASH, so the `)` after it really
+            // is the close. A scanner that skipped one character per
+            // backslash instead of two would get this backwards.
+            "cat <(echo a\\\\) ; cargo test --locked --lib",
+            // INSIDE `'` A BACKSLASH IS DATA, so `'a\'` is the
+            // literal `a\` and the quote CLOSES at the second `'`.
+            // Treating `'` the way `"` is treated makes the `\'` an
+            // escape, the quote never closes, no `)` is ever found, and
+            // this real gate is silently dropped. `bash -e -c
+            // "cat <(echo 'a\\') ; false"` exits 1 -- it is read.
+            "cat <(echo 'a\\') ; cargo test --locked --lib",
+            // The plain control, unchanged by any of this.
+            "cat <(echo a) ; cargo test --locked --lib",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                vec![line.to_string()],
+                "{line}: the substitution closes and the cargo test after it is top-level, \
+                 so its failure ends the step and it must still count"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cargo_test_inside_a_command_substitution_is_not_a_gate() {
+        for line in [
+            "echo $(cargo test --locked --lib)",
+            "OUT=$(cargo test --locked --lib)",
+            "echo `cargo test --locked --lib`",
+            "echo \"result: $(cargo test --locked --all-targets)\"",
+            // PROCESS SUBSTITUTION IS THE SAME SWALLOWING. `<( … )`
+            // hands the command a file to read; only the command's own
+            // status reaches the line. Measured, both directions:
+            // `bash -e -c 'cat <(false)'` and
+            // `bash -e -c 'echo x > >(false)'` each exit 0.
+            "cat <(cargo test --locked --all-targets)",
+            "diff <(cargo test --locked --lib) expected.txt",
+            "echo x > >(cargo test --locked --all-targets)",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line}: the substitution swallows the status, only the outer command's is read"
+            );
+        }
+    }
+
+    /// THE ACCEPTANCE HALF. A substitution in an ARGUMENT of a real run
+    /// must not stop it counting -- that is the ordinary spelling for a
+    /// thread count, and refusing it refuses a correct workflow.
+    #[test]
+    fn a_substitution_in_an_argument_leaves_the_run_counted() {
+        assert_eq!(
+            runs_with_overflow_checks("cargo test --locked --lib -- --test-threads=$(nproc)").len(),
+            1,
+            "the run is `cargo test`; the substitution is one of its arguments"
+        );
+        // A BARE SUBSHELL IS NOT A SUBSTITUTION. Its status is read, so
+        // it keeps falling through to the separator arm.
+        assert_eq!(
+            runs_with_overflow_checks("cargo test --locked --lib").len(),
+            1,
+        );
+    }
+
+    /// A BACKSLASH-ESCAPED QUOTE DOES NOT CLOSE THE SPAN.
+    ///
+    /// The quoted-span rule was `if c == q { quote = None }` with no
+    /// escape handling, so this split where the shell does not and the
+    /// tail read as a command being run.
+    #[test]
+    fn an_escaped_quote_does_not_end_the_quoted_span() {
+        for line in [
+            "echo \"a \\\" && cargo test --locked --lib\"",
+            "echo \"quoted \\\" cargo test --locked --all-targets\"",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line} is one `echo`; the escaped quote is data, not the end of the span"
+            );
+        }
+        // In `'` there are no escapes, so a backslash is data and the
+        // span still ends at the next `'`. Asserted so the conditional
+        // is a decision rather than an oversight.
+        assert_eq!(
+            runs_with_overflow_checks("echo 'a \\' && cargo test --locked --lib").len(),
+            1,
+            "single quotes have no escapes: the span ends and a real run follows"
+        );
+    }
+
+    /// AN `&&` LIST ONLY CARRIES ITS FAILURE IF IT ENDS THE LINE.
+    ///
+    /// Measured, because it is the opposite of what the shape suggests:
+    ///
+    ///     bash -e -c 'false && echo x'                exit 1
+    ///     bash -e -c 'false && echo x; echo REACHED'  exit 0, prints
+    ///
+    /// `set -e` exempts a command inside an `&&` list, and the list's
+    /// own failure does not abort either -- so whatever follows runs
+    /// and its status becomes the line's. A gate written that way
+    /// cannot fail.
+    #[test]
+    fn an_and_list_that_does_not_end_the_line_has_its_failure_swallowed() {
+        for line in [
+            "cargo test --locked --lib && echo ok; echo done",
+            "cargo test --locked --all-targets && echo ok; ls",
+            // A NEWLINE IS THE SPELLING A WORKFLOW ACTUALLY USES, and
+            // the two above cannot reach it: both put the following
+            // command on the same line, so "ends the line" was true
+            // and the rule said read. Measured:
+            // `bash -e -c $'false && echo x\necho R'` exits 0.
+            "cargo test --locked --all-targets && echo done\necho \"second line\"\n",
+            "cargo test --locked --lib && echo ok\ncargo build --locked\n",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line}: the && list is followed by another command, so its status is replaced"
+            );
+        }
+    }
+
+    /// THE ACCEPTANCE HALF, and it is the common spelling: an `&&` list
+    /// that ends the line does carry the failure.
+    #[test]
+    fn an_and_list_that_ends_the_line_still_counts() {
+        for line in [
+            "cargo test --locked --lib && echo ok",
+            "cargo test --locked --lib && echo ok && echo done",
+            "cd .. && cargo test --locked --lib",
+            // THE ACCEPTANCE HALF OF THE MULTI-LINE RULE. When the
+            // chain IS the last line, its status is the step's, and a
+            // fix that keyed on "is a multi-line block" rather than on
+            // "is the last line" would refuse this.
+            "set -euo pipefail\ncargo test --locked --all-targets && echo ok\n",
+            "cd ..\ncargo test --locked --lib && echo ok\n",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line}: exit 1 propagates, measured with bash -e"
+            );
+        }
+    }
+
+    /// `set +o errexit` ON THE SAME LINE disqualifies the script, the
+    /// long spelling as much as the short one. Pinned because it was
+    /// raised as a possible hole and is not one.
+    #[test]
+    fn a_same_line_set_plus_e_still_disqualifies_the_script() {
+        for line in [
+            "set +o errexit; cargo test --locked --lib",
+            "set +e; cargo test --locked --lib",
+            "set +ex; cargo test --locked --lib",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line}: measured -- bash -e -c 'set +o errexit; false; echo R' exits 0"
+            );
+        }
+    }
+
+    /// AND THE DELIBERATE OVER-STRICTNESS BESIDE IT, stated as a test
+    /// rather than as a comment.
+    ///
+    /// A script that turns `errexit` off and back on again is refused
+    /// whole. Restoring it does make the later run gate again, so this
+    /// refuses a workflow that would work — the file's declared
+    /// direction, because tracking where the setting is live means
+    /// tracking control flow. It fails loudly with the script quoted,
+    /// which is the outcome this file prefers to a silent pass.
+    #[test]
+    fn errexit_restored_later_is_still_refused_and_that_is_deliberate() {
+        let script = "set +e\nsomething || true\nset -e\ncargo test --locked --lib\n";
+        assert_eq!(
+            runs_with_overflow_checks(script),
+            Vec::<String>::new(),
+            "over-strict on purpose: the guard does not track where `set -e` is live"
+        );
     }
 
     /// The near miss that the trailing space protects: `--tests` DOES
@@ -955,6 +2613,161 @@ mod handshake {
         assert_eq!(
             debug_runs_that_prove_the_build_traps(script),
             Vec::<String>::new(),
+        );
+    }
+
+    /// A PRINTED MENTION IS NOT AN ASSIGNMENT, and it is not a comment
+    /// either — which is why stripping comments did not close this.
+    ///
+    /// `echo "EXPECT_OVERFLOW_CHECKS=1"` on its own line armed the
+    /// whole step, so every `cargo test` in it counted as proving the
+    /// build traps, while the process received no variable and the
+    /// runtime probe returned without asserting anything.
+    /// AN ASSIGNMENT WITH NO COMMAND AFTER IT ARMS NOTHING.
+    ///
+    /// A prefix assignment is exported to the command it prefixes and
+    /// to nothing else, so a standalone `EXPECT_OVERFLOW_CHECKS=1` line
+    /// sets a SHELL variable that the next line's `cargo test` never
+    /// sees. The guard reported a probe that could not have run.
+    #[test]
+    fn an_assignment_with_no_command_after_it_arms_nothing() {
+        for line in [
+            "EXPECT_OVERFLOW_CHECKS=1",
+            "  EXPECT_OVERFLOW_CHECKS=1  ",
+            "env EXPECT_OVERFLOW_CHECKS=1",
+            "EXPECT_OVERFLOW_CHECKS=1 OTHER=2",
+            // `export` with nothing to export is the same shape.
+            "export",
+        ] {
+            assert!(
+                !super::line_assigns_the_handshake(line),
+                "{line}: nothing is exported, so no later cargo test can see the handshake"
+            );
+        }
+
+        // AND THE WHOLE STEP IS NOT ARMED BY ONE. This is the shape a
+        // workflow would actually be written in, and it is what
+        // `gating_runs_that_prove_the_build_traps` reads.
+        let block = "EXPECT_OVERFLOW_CHECKS=1\ncargo test --locked --lib\n";
+        assert_eq!(
+            super::debug_runs_that_prove_the_build_traps(block),
+            Vec::<String>::new(),
+            "the assignment is on its own line, so the cargo test runs without it"
+        );
+    }
+
+    /// ACCEPTANCE FOR THAT, AND IT IS THE HALF A `require export` FIX
+    /// WOULD HAVE BROKEN.
+    ///
+    /// `EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib` is the
+    /// spelling this repository's own workflow uses. Requiring `export`
+    /// would refuse it — the guard refusing a correct workflow, which
+    /// is the failure this file's history is made of.
+    #[test]
+    fn the_spellings_that_really_export_it_still_arm_the_step() {
+        for line in [
+            "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+            "env EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+            "EXPECT_OVERFLOW_CHECKS=1 RUST_BACKTRACE=1 cargo test --locked --lib",
+            "RUST_BACKTRACE=1 EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+            "export EXPECT_OVERFLOW_CHECKS=1",
+            "export RUST_BACKTRACE=1 EXPECT_OVERFLOW_CHECKS=1",
+        ] {
+            assert!(
+                super::line_assigns_the_handshake(line),
+                "{line} really does put the handshake in an environment a child receives"
+            );
+        }
+
+        // And the printer is still refused, unchanged by any of this.
+        assert!(
+            !super::line_assigns_the_handshake("echo EXPECT_OVERFLOW_CHECKS=1"),
+            "a printed handshake still arms nothing"
+        );
+    }
+
+    #[test]
+    fn a_printed_handshake_does_not_arm_the_step() {
+        for line in [
+            "echo \"EXPECT_OVERFLOW_CHECKS=1\"",
+            "echo EXPECT_OVERFLOW_CHECKS=1",
+            "printf '%s\\n' EXPECT_OVERFLOW_CHECKS=1",
+            "echo \"setting EXPECT_OVERFLOW_CHECKS=1 for this step\"",
+            "grep -q EXPECT_OVERFLOW_CHECKS=1 ci.yml",
+        ] {
+            assert!(
+                !super::line_assigns_the_handshake(line),
+                "{line} mentions the handshake; it does not set it"
+            );
+        }
+    }
+
+    /// THE ACCEPTANCE HALF, and it is the larger risk: refusing a real
+    /// assignment makes the guard reject a workflow that is doing
+    /// exactly what it asks for.
+    #[test]
+    fn every_spelling_that_really_assigns_it_still_arms_the_step() {
+        for line in [
+            "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+            "env EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+            "RUST_BACKTRACE=1 EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+            "export EXPECT_OVERFLOW_CHECKS=1",
+            "EXPECT_OVERFLOW_CHECKS=1 cargo +stable test --locked --lib",
+        ] {
+            assert!(
+                super::line_assigns_the_handshake(line),
+                "{line} assigns the handshake and must arm the step"
+            );
+        }
+    }
+
+    /// THE SECOND CALL SITE. `debug_runs_that_prove_the_build_traps`
+    /// asked the same question with the same `contains`, and fixing
+    /// only `step_declares_the_handshake` left the suite green — no
+    /// test drove this path with a printed mention on the same line as
+    /// a real run.
+    #[test]
+    fn a_printed_handshake_beside_a_real_run_does_not_prove_anything() {
+        for script in [
+            "echo \"EXPECT_OVERFLOW_CHECKS=1\" && cargo test --locked --lib\n",
+            "cargo test --locked --lib -- --skip EXPECT_OVERFLOW_CHECKS=1\n",
+        ] {
+            assert_eq!(
+                debug_runs_that_prove_the_build_traps(script),
+                Vec::<String>::new(),
+                "{script:?}: the handshake is mentioned, not assigned, so the process \
+                 gets no variable and the runtime probe asserts nothing"
+            );
+        }
+    }
+
+    /// The acceptance half of that call site: the same line shape with a
+    /// real assignment still counts.
+    #[test]
+    fn a_real_assignment_beside_a_run_on_one_line_still_counts() {
+        let script = "export EXPECT_OVERFLOW_CHECKS=1 && cargo test --locked --lib\n";
+        assert_eq!(debug_runs_that_prove_the_build_traps(script).len(), 1);
+    }
+
+    /// The `env:` mapping is untouched by any of this, and it is the
+    /// only spelling that works on a matrix including `windows-latest`.
+    #[test]
+    fn the_env_mapping_still_arms_the_step() {
+        let step = super::Step {
+            keys: vec!["run".to_string(), "env".to_string()],
+            run: "cargo test --locked --lib\n".to_string(),
+            env: vec!["EXPECT_OVERFLOW_CHECKS=1".to_string()],
+        };
+        assert!(super::step_declares_the_handshake(&step));
+
+        let printed = super::Step {
+            keys: vec!["run".to_string()],
+            run: "echo \"EXPECT_OVERFLOW_CHECKS=1\"\ncargo test --locked --lib\n".to_string(),
+            env: Vec::new(),
+        };
+        assert!(
+            !super::step_declares_the_handshake(&printed),
+            "a step whose only mention is printed is not armed"
         );
     }
 }
@@ -1128,6 +2941,91 @@ overflow-checks = false
 /// green while the gate stopped gating.
 mod gating {
     use super::gating_runs_that_prove_the_build_traps;
+
+    /// A HANDSHAKE IN A SHELL COMMENT DOES NOT ARM THE STEP.
+    ///
+    /// `step_declares_the_handshake` read `step.run` verbatim while the
+    /// command scan stripped comments, so this workflow satisfied both
+    /// assertions and handed the process no `EXPECT_OVERFLOW_CHECKS` at
+    /// all -- leaving the runtime probe to return without asserting
+    /// anything.
+    ///
+    /// The existing `handshake::the_handshake_quoted_in_a_comment_does_not_count`
+    /// looks like this test and is not: it exercises the script-level
+    /// path, which was already comment-stripped, and its fixture has no
+    /// real command after the comment, so it could not diverge on the
+    /// defect even pointed at the right function.
+    #[test]
+    fn a_handshake_in_a_shell_comment_does_not_arm_a_step() {
+        for block in [
+            "      - run: |\n          # EXPECT_OVERFLOW_CHECKS=1 -- see ci_profile.rs\n          cargo test --locked --lib\n",
+            "      - run: |\n          cargo test --locked --lib  # EXPECT_OVERFLOW_CHECKS=1 is set in CI\n",
+        ] {
+            let yaml = GATING.replace(
+                "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+                block,
+            );
+            assert!(
+                gating_runs_that_prove_the_build_traps(&yaml).is_empty(),
+                "the variable is named in a comment, so the process never receives \
+                 it and the runtime probe asserts nothing: {block:?}"
+            );
+        }
+    }
+
+    /// A HANDSHAKE GLUED TO A TERMINATOR DOES NOT ARM THE STEP EITHER.
+    ///
+    /// `command_lines` cut the comment at `" #"`, which is the rule
+    /// "a `#` that begins a word" written for exactly one of the
+    /// characters that end a word. The three it missed are the ones
+    /// `shell_commands` already splits on, so the two readers of one
+    /// text had two grammars again -- the defect this file records
+    /// having fixed once already, at a different character.
+    ///
+    /// `&&#` is not valid bash, and is here anyway: the guard must not
+    /// depend on the evasion being a shape bash would accept, and
+    /// over-strict is the safe direction everywhere in this file.
+    #[test]
+    fn a_handshake_glued_to_a_terminator_does_not_arm_a_step() {
+        for block in [
+            "      - run: |\n          cargo test --locked --lib;# EXPECT_OVERFLOW_CHECKS=1 is set in CI\n",
+            "      - run: |\n          (cargo test --locked --lib)# EXPECT_OVERFLOW_CHECKS=1 is set in CI\n",
+            "      - run: |\n          cargo test --locked --lib && echo ok&&# EXPECT_OVERFLOW_CHECKS=1 is set in CI\n",
+        ] {
+            let yaml = GATING.replace(
+                "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+                block,
+            );
+            assert!(
+                gating_runs_that_prove_the_build_traps(&yaml).is_empty(),
+                "the variable is named in a comment, so the process never receives \
+                 it and the runtime probe asserts nothing: {block:?}"
+            );
+        }
+    }
+
+    /// THE ACCEPTANCE HALF: both real spellings still arm the step.
+    ///
+    /// The `env:` mapping is not a concession -- it is the only
+    /// spelling that works on a matrix including `windows-latest`.
+    #[test]
+    fn both_real_spellings_of_the_handshake_still_arm_a_step() {
+        for block in [
+            "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+            "      - run: cargo test --locked --lib\n        env:\n          EXPECT_OVERFLOW_CHECKS: \"1\"\n",
+            "      - run: |\n          # the guard is armed below, not here\n          EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+        ] {
+            let yaml = GATING.replace(
+                "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+                block,
+            );
+            assert_eq!(
+                gating_runs_that_prove_the_build_traps(&yaml).len(),
+                1,
+                "this step really does ask the build to prove it traps: {block:?}"
+            );
+        }
+    }
 
     /// The shape that does gate, as a control. Every test below is this
     /// with one thing added, so a failure here would mean the fixture
