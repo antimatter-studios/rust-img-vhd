@@ -502,7 +502,17 @@ impl VhdReader {
     /// [`size_with_exact_geometry`](crate::footer_build::size_with_exact_geometry)
     /// of the request: rounded up, as qemu-img does, so the footer's CHS
     /// geometry and `current_size` describe the same disk. Check
-    /// [`VhdReader::virtual_size`] on the result for the size created. The data area is
+    /// [`VhdReader::virtual_size`] on the result for the size created.
+    ///
+    /// ABOVE THE CHS CEILING THE TWO CANNOT AGREE, and that is kept rather
+    /// than refused. A request larger than `65535 * 16 * 255` sectors
+    /// (about 127.5 GiB) is created at exactly its own size with the geometry
+    /// saturated at 65535/16/255, so `current_size` is the only field that
+    /// describes the disk and a reader that sizes it from CHS sees at most
+    /// the ceiling. It is what `qemu-img create -f vpc -o subformat=fixed`
+    /// writes (measured at 200 GiB: CHS 65535/16/255, `current_size`
+    /// 214,748,364,800, `qemu-img info` reports 200 GiB). Refusing would
+    /// cap fixed images far below the format's own size limit. The data area is
     /// allocated via [`std::fs::File::set_len`], which leaves the
     /// region sparse on filesystems that support it (APFS, ext4, NTFS,
     /// XFS, ZFS) — no explicit zero-fill is performed.

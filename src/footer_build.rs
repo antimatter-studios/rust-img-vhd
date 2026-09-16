@@ -270,6 +270,32 @@ mod tests {
     use super::*;
     use crate::footer::Footer;
 
+    /// ABOVE THE CEILING THE SIZE IS KEPT AND THE GEOMETRY SATURATES
+    /// (review on #78). At the ceiling itself the geometry still describes
+    /// the disk exactly; one sector past it, the request comes back
+    /// unchanged and CHS reports the ceiling, as qemu-img writes for a
+    /// 200 GiB fixed VHD. A change that silently capped or refused such a
+    /// size, or started rounding it, fails here.
+    #[test]
+    fn a_size_above_the_chs_ceiling_is_kept_with_saturated_geometry() {
+        let ceiling = chs::MAX_ADDRESSABLE_SECTORS * SECTOR_SIZE;
+        assert_eq!(chs_for_size(ceiling), (65535, 16, 255));
+        assert_eq!(size_with_exact_geometry(ceiling), ceiling);
+
+        for above in [ceiling + SECTOR_SIZE, 200 * (1u64 << 30)] {
+            assert_eq!(
+                size_with_exact_geometry(above),
+                above,
+                "a request above the ceiling is created at its own size"
+            );
+            assert_eq!(
+                chs_for_size(above),
+                (65535, 16, 255),
+                "and its geometry saturates at the maximum"
+            );
+        }
+    }
+
     #[test]
     fn built_footer_round_trips_through_parser() {
         let f = build_fixed_footer(64 * 1024 * 1024);
