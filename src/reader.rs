@@ -169,8 +169,9 @@ impl VhdReader {
                     return Err(tail_err);
                 }
                 let mut mirror_bytes = [0u8; FOOTER_SIZE];
-                dev.read_at(0, &mut mirror_bytes)
-                    .map_err(fs_core_to_vhd_error)?;
+                if dev.read_at(0, &mut mirror_bytes).is_err() {
+                    return Err(tail_err);
+                }
                 match Footer::parse(&mirror_bytes) {
                     Ok(mirror)
                         if matches!(
@@ -318,8 +319,20 @@ impl VhdReader {
                 // This is the same number the allocator uses for the
                 // tail, computed once and shared rather than written
                 // twice with a footer between the two spellings.
+                //
+                // Unless the footer came from the mirror. Then the last
+                // sector is either a damaged footer or -- when the file
+                // was truncated by its footer -- the end of the last
+                // block, and nothing here can tell which. Both are
+                // accepted: the data area runs to `dev_size`, and the
+                // tail goes after whichever is further out, the last
+                // block or the damaged footer's sector.
                 let next_alloc = dev_size.saturating_sub(FOOTER_SIZE as u64);
-                let data_end = next_alloc;
+                let data_end = if footer_from_mirror {
+                    dev_size
+                } else {
+                    next_alloc
+                };
 
                 let mut allocated: Vec<u32> = Vec::new();
                 for &entry in &bat {
@@ -356,6 +369,12 @@ impl VhdReader {
                 }) {
                     return Err(Error::Corrupt("two BAT entries name overlapping blocks"));
                 }
+                let next_alloc = match allocated.last() {
+                    Some(&last) if footer_from_mirror => {
+                        next_alloc.max((last as u64) * SECTOR_SIZE + block_total)
+                    }
+                    _ => next_alloc,
+                };
 
                 // A differencing image's parent-locator payloads are
                 // metadata too, but they sit wherever the writer put them

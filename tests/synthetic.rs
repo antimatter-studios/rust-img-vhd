@@ -1379,6 +1379,91 @@ fn a_dynamic_image_with_a_damaged_trailing_footer_opens_from_the_mirror() {
     );
 }
 
+/// A copy that stopped exactly one footer short -- the file ends where
+/// the last block does -- opens from the mirror too, rather than having
+/// that block refused for running into a footer that is not there.
+#[test]
+fn a_dynamic_image_truncated_by_its_footer_opens_from_the_mirror() {
+    let path = tmp_path("footer_truncated");
+    let block: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+    build_dynamic_vhd(&path, &block, 0xFF);
+    let len = std::fs::metadata(&path).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(len - FOOTER_SIZE as u64)
+        .unwrap();
+
+    let r = VhdReader::open(&path)
+        .expect("only the redundant trailing footer is gone, so the image must open");
+    assert!(r.footer_recovered_from_mirror());
+    let mut buf = vec![0u8; 4096];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, block, "the last block must read in full");
+}
+
+/// Writing to a recovered, truncated image allocates after the last
+/// block rather than over it, and leaves an image that opens normally.
+#[test]
+fn a_write_to_a_truncated_image_allocates_after_its_last_block() {
+    let path = tmp_path("footer_truncated_rw");
+    let block: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+    build_dynamic_vhd(&path, &block, 0xFF);
+    let len = std::fs::metadata(&path).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(len - FOOTER_SIZE as u64)
+        .unwrap();
+
+    let r = VhdReader::open_rw(&path).unwrap();
+    assert!(r.footer_recovered_from_mirror());
+    r.write_at(4096, &[0xEE; 512]).unwrap();
+    r.flush_writes().unwrap();
+    drop(r);
+
+    let r = VhdReader::open(&path).expect("the allocation wrote a trailing footer");
+    assert!(!r.footer_recovered_from_mirror());
+    let mut buf = vec![0u8; 8192];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(
+        &buf[..4096],
+        &block[..],
+        "block 0 was overwritten by the allocation"
+    );
+    assert_eq!(&buf[4096..4608], &[0xEE; 512][..]);
+}
+
+/// When the tail does not parse and the mirror cannot even be read, the
+/// error is the tail's: that is the footer the image was meant to have,
+/// and a storage error at offset 0 would send the caller after the wrong
+/// sector.
+#[test]
+fn an_unreadable_mirror_reports_the_trailing_footer_error() {
+    struct NoSectorZero(fs_core::FileDevice);
+    impl fs_core::BlockRead for NoSectorZero {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+            if offset == 0 {
+                return Err(fs_core::Error::Custom("sector 0 is unreadable".into()));
+            }
+            self.0.read_at(offset, buf)
+        }
+        fn size_bytes(&self) -> u64 {
+            fs_core::BlockRead::size_bytes(&self.0)
+        }
+    }
+    impl fs_core::BlockDevice for NoSectorZero {}
+
+    let (path, _) = dynamic_with_damaged_footer("footer_mirror_unreadable", false);
+    let dev = NoSectorZero(fs_core::FileDevice::open(&path).unwrap());
+    let err = VhdReader::open_on_device(std::sync::Arc::new(dev))
+        .err()
+        .expect("no readable footer must be refused");
+    assert!(matches!(err, vhd::Error::NotVhd), "got {err:?}");
+}
+
 /// With both copies gone there is nothing to recover from.
 #[test]
 fn a_dynamic_image_with_both_footers_damaged_is_refused() {
