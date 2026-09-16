@@ -977,24 +977,30 @@ impl VhdReader {
     /// discipline of its own beyond "under `bat`".
     ///
     /// Crash-safety order:
+    ///   0. Check the BAT can name the new block, then write the trailing
+    ///      footer at the new tail, past the block.
+    ///      → flush
     ///   1. Zero-init the new block's bitmap+data range on disk
     ///      (so a partial subsequent step can't expose old tail bytes).
     ///      → flush
     ///   2. Update the in-file BAT entry.
     ///      → flush
-    ///   3. Rewrite the trailing footer mirror at the new tail.
-    ///      → flush
     ///
-    /// The tail is *read* before step 1 and *advanced* between steps 1
+    /// Step 0 comes first because the first block's range starts on the
+    /// old footer: with the footer rewritten last, any failure in between
+    /// left a file ending in no footer (#54). Now the file ends in a valid
+    /// footer at every instant.
+    ///
+    /// The tail is *read* before step 0 and *advanced* between steps 1
     /// and 2, and that placement is the whole of the failure handling —
     /// there is no rollback, because the commit point is the last
     /// moment the space is provably free rather than a guess made
     /// afterwards:
     ///
-    ///   * Fail in step 1 and the tail never moved. All that is out
-    ///     there is a zeroed range nothing references, and the next
-    ///     allocation reuses the same offset.
-    ///   * Fail in step 2 or step 3 and the tail has already moved.
+    ///   * Fail in step 0 or 1 and the tail never moved. All that is out
+    ///     there is a range nothing references, in front of a footer,
+    ///     and the next allocation reuses the same offset.
+    ///   * Fail in step 2 and the tail has already moved.
     ///     From the moment the BAT write is issued the entry may be on
     ///     the device whatever the call returns, so the range has to be
     ///     treated as live and never handed out again. The block leaks;
@@ -1028,6 +1034,24 @@ impl VhdReader {
             let tail = self.next_alloc_off.lock().unwrap();
             tail.ok_or(Error::Corrupt("allocate but no tail offset (fixed?)"))?
         };
+
+        // A VALID TRAILING FOOTER AT EVERY INSTANT (#54). The first
+        // allocation's range begins exactly on the trailing footer, and
+        // the footer used to be put back only as the last step, so every
+        // failure in between -- a refused BAT entry, a short write while
+        // zeroing, a failed BAT write -- left a file that ended in no
+        // footer at all.
+        //
+        // So the entry is validated before anything is written, and the
+        // footer's new copy is written and flushed PAST the block before
+        // the old one is zeroed over. A failure after that leaves a longer
+        // file with a good footer and an unreferenced range in front of
+        // it: the leak the design already accepts below, without the
+        // window in which the image had no footer.
+        let bat_value = bat_entry_for(new_block_off)?;
+        let new_footer_off = new_block_off + block_total;
+        self.dev_write(new_footer_off, &self.footer_bytes)?;
+        self.dev_flush()?;
 
         // Step 1: zero-init bitmap + data area at the new tail.
         // FileDevice's write_at extends the file as needed; on
@@ -1074,7 +1098,6 @@ impl VhdReader {
         }
 
         // Step 2: publish the new block in the on-disk BAT.
-        let bat_value = bat_entry_for(new_block_off)?;
         let bat_entry_off = dyn_hdr.table_offset + (block_idx as u64) * 4;
         self.dev_write(bat_entry_off, &bat_value.to_be_bytes())?;
         self.dev_flush()?;
@@ -1090,13 +1113,8 @@ impl VhdReader {
             .ok_or(Error::Corrupt("allocate but no BAT"))?;
         bat[block_idx] = bat_value;
 
-        // Step 3: rewrite the trailing footer mirror at the new tail.
-        // The bytes haven't changed (footer.current_size etc are
-        // unchanged); we just put the same 512 bytes at the new offset.
-        let new_footer_off = new_block_off + block_total;
-        self.dev_write(new_footer_off, &self.footer_bytes)?;
-        self.dev_flush()?;
-
+        // No step 3: the footer already sits at the new tail, written
+        // before the zeroing above.
         Ok(new_block_off)
     }
 
