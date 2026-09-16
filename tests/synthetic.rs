@@ -1243,6 +1243,108 @@ fn two_bat_entries_exactly_one_block_apart_are_accepted() {
     assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
+/// A differencing child beside a real parent, with parent-locator 0 set
+/// to `(code, space, length, offset)`. The child's layout is
+/// `build_differencing_vhd`'s: header at 512, BAT at [1536, 1544), sector
+/// 4 free, block 0 (bitmap + data) at [2560, 7168), trailing footer at
+/// 7168. The payload text is written at `offset` only when `plant`, so a
+/// locator over existing metadata leaves that metadata intact and the
+/// image fails, if at all, for the overlap alone.
+fn differencing_with_locator(
+    name: &str,
+    code: &[u8; 4],
+    space: u32,
+    length: u32,
+    offset: u64,
+    plant: bool,
+) -> (TempPath, TempPath) {
+    const LOCATOR0: u64 = 512 + 576;
+    let parent = tmp_path(&format!("{name}_parent"));
+    let mut p = File::create(&parent).unwrap();
+    p.write_all(&[0xAB; 8 * 1024]).unwrap();
+    p.write_all(&build_footer(DiskType::Fixed, u64::MAX, 8 * 1024))
+        .unwrap();
+    drop(p);
+    let child = tmp_path(&format!("{name}_child"));
+    build_differencing_vhd(&child, &parent, 0xFF, 0x11);
+
+    let mut hdr = std::fs::read(&child).unwrap()[512..512 + DYN_HEADER_SIZE].to_vec();
+    let at = (LOCATOR0 - 512) as usize;
+    hdr[at..at + 4].copy_from_slice(code);
+    hdr[at + 4..at + 8].copy_from_slice(&space.to_be_bytes());
+    hdr[at + 8..at + 12].copy_from_slice(&length.to_be_bytes());
+    hdr[at + 16..at + 24].copy_from_slice(&offset.to_be_bytes());
+    hdr[36..40].fill(0);
+    let cs = dyn_cs(&hdr);
+    hdr[36..40].copy_from_slice(&cs.to_be_bytes());
+    patch(&child, 512, &hdr);
+    if plant {
+        patch(
+            &child,
+            offset,
+            b"LOCATOR-PAYLOAD-DO-NOT-SERVE-AS-GUEST-DATA",
+        );
+    }
+    (child, parent)
+}
+
+#[test]
+fn a_parent_locator_inside_a_block_is_refused_at_open() {
+    // The payload sits in block 0's data at host 3072, so a guest read of
+    // virtual 0 would return the locator bytes and a guest write there
+    // would destroy the structure other tools use to find the parent.
+    let (child, _parent) = differencing_with_locator("loc_in_block", b"W2ru", 512, 42, 3072, true);
+    let err = VhdReader::open(&child)
+        .err()
+        .expect("a locator payload inside a block aliases guest data and must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}
+
+#[test]
+fn a_parent_locator_over_the_image_metadata_is_refused_at_open() {
+    // Below data_start, or on the trailing footer, so a check against
+    // blocks alone would miss every one of these. Nothing is planted:
+    // the metadata stays intact, so only the overlap can refuse it.
+    for (what, offset) in [
+        ("the footer mirror", 0u64),
+        ("the dynamic header", 1000),
+        ("the BAT", 1536),
+        ("the trailing footer", 7168),
+    ] {
+        let (child, _parent) = differencing_with_locator(
+            &format!("loc_meta_{offset}"),
+            b"W2ku",
+            512,
+            42,
+            offset,
+            false,
+        );
+        let err = VhdReader::open(&child)
+            .err()
+            .unwrap_or_else(|| panic!("a locator payload overlapping {what} must be refused"));
+        assert!(matches!(err, vhd::Error::Corrupt(_)), "{what}: got {err:?}");
+    }
+}
+
+#[test]
+fn a_parent_locator_between_the_bat_and_the_blocks_is_accepted() {
+    // Sector 4 is free: after the BAT, before block 0. That is where a
+    // real writer puts it. The extent is judged by platform_data_length,
+    // so a space written in bytes (512) and one written in sectors (1)
+    // are both accepted rather than one being read 512 times too large.
+    for space in [512u32, 1] {
+        let (child, _parent) =
+            differencing_with_locator(&format!("loc_ok_{space}"), b"W2ru", space, 42, 2048, true);
+        let r = VhdReader::open(&child).expect("a locator in free space must open");
+        let mut buf = [0u8; 8];
+        r.read_at(0, &mut buf).unwrap();
+        assert_eq!(
+            buf, [0x11; 8],
+            "block 0 must still read as the child's data"
+        );
+    }
+}
+
 #[test]
 fn the_unmodified_fixture_still_opens_and_reads() {
     // The positive control for the four refusals above: the same

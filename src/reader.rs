@@ -325,6 +325,57 @@ impl VhdReader {
                     return Err(Error::Corrupt("two BAT entries name overlapping blocks"));
                 }
 
+                // A differencing image's parent-locator payloads are
+                // metadata too, but they sit wherever the writer put them
+                // rather than below `data_start`, so they cannot join
+                // `metadata_end` -- a legal locator late in the file would
+                // push the floor past every block. Each payload is checked
+                // as an extent instead: it must not share a byte with the
+                // footer mirror, the dynamic header, the BAT, any block,
+                // or the trailing footer. Otherwise a guest read is served
+                // locator bytes and a guest write destroys the structure
+                // other tools use to find the parent.
+                //
+                // The extent is `platform_data_length` bytes. The spec
+                // gives `platform_data_space` in sectors and some writers
+                // store bytes there, so trusting it would refuse real
+                // images; the length is unambiguous.
+                if footer.disk_type == DiskType::Differencing {
+                    let dyn_header_end = footer.data_offset + DYN_HEADER_SIZE as u64;
+                    for loc in &dyn_hdr.parent_locators {
+                        if loc.platform_code == [0; 4] || loc.platform_data_length == 0 {
+                            continue;
+                        }
+                        let start = loc.platform_data_offset;
+                        let end = start
+                            .checked_add(loc.platform_data_length as u64)
+                            .ok_or(Error::Corrupt("parent locator extent overflows"))?;
+                        let overlaps = |from: u64, to: u64| start < to && from < end;
+                        if end > data_end
+                            || overlaps(0, FOOTER_SIZE as u64)
+                            || overlaps(footer.data_offset, dyn_header_end)
+                            || overlaps(dyn_hdr.table_offset, table_end)
+                        {
+                            return Err(Error::Corrupt(
+                                "parent locator payload overlaps the image's metadata",
+                            ));
+                        }
+                        // `allocated` is sorted and its blocks do not
+                        // overlap, so the last block starting before
+                        // `end` reaches furthest; if it stops short of
+                        // `start`, every earlier one does too.
+                        let before_end =
+                            allocated.partition_point(|&e| (e as u64) * SECTOR_SIZE < end);
+                        if let Some(&e) = before_end.checked_sub(1).map(|i| &allocated[i]) {
+                            if (e as u64) * SECTOR_SIZE + block_total > start {
+                                return Err(Error::Corrupt(
+                                    "parent locator payload overlaps a data block",
+                                ));
+                            }
+                        }
+                    }
+                }
+
                 let parent = if footer.disk_type == DiskType::Differencing {
                     let child_path = owning_path.as_deref().ok_or(Error::Unsupported(
                         "differencing VHD opened on a raw device; parent resolution needs a path",
