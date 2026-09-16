@@ -2303,6 +2303,45 @@ fn a_first_allocation_that_fails_part_way_leaves_an_image_that_opens() {
     }
 }
 
+/// A short write of the footer's new copy is written again, whole.
+///
+/// The copy extends the file, and a write that lands part of it -- ENOSPC
+/// mid-sector, say -- left the file ending at 7268 bytes: mid-sector, with
+/// no footer at its end. A block device cannot be truncated, so the repair
+/// is one more complete write over the same range, which here succeeds.
+#[test]
+fn a_short_write_of_the_new_footer_is_written_again_whole() {
+    let path = tmp_path("alloc_short_footer");
+    build_dynamic_vhd_all_sparse(&path);
+    let footer_at = SPARSE_FIXTURE_END_OF_DATA + SPARSE_FIXTURE_BLOCK_TOTAL;
+    let shorted = std::sync::atomic::AtomicBool::new(false);
+    {
+        let dev = FailingWrites {
+            inner: fs_core::FileDevice::open_rw(&path).unwrap(),
+            refuse: Box::new(move |off, len| {
+                (off == footer_at
+                    && len == FOOTER_SIZE
+                    && !shorted.swap(true, std::sync::atomic::Ordering::SeqCst))
+                .then_some(100)
+            }),
+        };
+        let r = VhdReader::open_rw_on_device(Arc::new(dev)).unwrap();
+        r.write_at(0, &[0xAB; 16])
+            .expect("the retried footer lets the write finish");
+    }
+    let bytes = std::fs::read(&*path).unwrap();
+    assert_eq!(
+        bytes.len() as u64,
+        file_len_after_allocations(1),
+        "the file ends mid-sector"
+    );
+    assert_eq!(&bytes[bytes.len() - FOOTER_SIZE..][..8], FOOTER_COOKIE);
+    let r = VhdReader::open(&path).unwrap();
+    let mut buf = [0u8; 16];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, [0xAB; 16]);
+}
+
 /// The one allocation `bat_entry_for` refuses outright: a block at host
 /// offset `2^41 - 512` would need the BAT's "absent" value. The refusal
 /// came after the block range -- which begins at the footer -- had been

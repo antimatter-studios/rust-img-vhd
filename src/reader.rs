@@ -1050,7 +1050,17 @@ impl VhdReader {
         // window in which the image had no footer.
         let bat_value = bat_entry_for(new_block_off)?;
         let new_footer_off = new_block_off + block_total;
-        self.dev_write(new_footer_off, &self.footer_bytes)?;
+        // A SHORT WRITE HERE IS THE ONE FAILURE THE ORDER CANNOT ABSORB. The
+        // footer's new copy extends the file, and a write that lands part of
+        // it leaves the file ending mid-sector with no footer at the end --
+        // the state this reordering exists to prevent. A `BlockDevice`
+        // cannot be truncated back, so the only repair it offers is one more
+        // complete write over the same range; if that fails too, the error
+        // is the first one (Greptile on #81).
+        if let Err(first) = self.dev_write(new_footer_off, &self.footer_bytes) {
+            self.dev_write(new_footer_off, &self.footer_bytes)
+                .map_err(|_| first)?;
+        }
         self.dev_flush()?;
 
         // Step 1: zero-init bitmap + data area at the new tail.
