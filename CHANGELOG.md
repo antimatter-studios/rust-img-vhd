@@ -7,6 +7,23 @@ never does.
 
 ## [Unreleased]
 
+### Changed
+
+- **`Error::ReadOnly` carries its cause** (breaking: match `ReadOnly(_)`).
+  One message used to cover three causes: the reader was opened
+  read-only, the subtype has no write path (differencing), or the
+  caller's backing device is not writable. A C caller of
+  `vhd_open_rw_on_device` given a non-writable device was told the
+  *image* might be an unimplemented subtype. The message now names the
+  device (#69).
+
+### Fixed
+
+- `include/vhd.h` and `vhd_open_rw_on_device`'s docs no longer promise
+  `FS_CORE_READ_ONLY`. That function returns a pointer, and
+  `fs_core.h`'s only error channel for a constructor is
+  `fs_core_last_error_message()` (#69).
+
 ## [0.3.5] — 2026-09-06
 
 ### Fixed

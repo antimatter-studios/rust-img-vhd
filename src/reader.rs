@@ -124,10 +124,10 @@ impl VhdReader {
 
     /// Open read-write on top of an arbitrary [`BlockDevice`]. The
     /// device must report `is_writable()`; otherwise the call returns
-    /// [`Error::ReadOnly`].
+    /// [`Error::ReadOnly`] naming the device as the cause.
     pub fn open_rw_on_device(dev: Arc<dyn BlockDevice>) -> Result<Self> {
         if !dev.is_writable() {
-            return Err(Error::ReadOnly);
+            return Err(Error::ReadOnly("backing device is not writable"));
         }
         Self::open_inner(dev, true, MAX_PARENT_DEPTH, None)
     }
@@ -484,8 +484,11 @@ impl VhdReader {
     /// is that the image structure stays consistent and that no
     /// non-overlapping write is lost.
     pub fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
+        if !self.writable {
+            return Err(Error::ReadOnly("reader was opened read-only"));
+        }
         if !self.writable() {
-            return Err(Error::ReadOnly);
+            return Err(Error::ReadOnly(NO_DIFFERENCING_WRITES));
         }
         let len = buf.len() as u64;
         if len == 0 {
@@ -511,7 +514,7 @@ impl VhdReader {
                 self.dev_write(offset, buf)
             }
             DiskType::Dynamic => self.write_sparse(offset, buf),
-            DiskType::Differencing => Err(Error::ReadOnly),
+            DiskType::Differencing => Err(Error::ReadOnly(NO_DIFFERENCING_WRITES)),
         }
     }
 
@@ -1283,13 +1286,16 @@ impl fs_core::BlockDevice for VhdReader {
     }
 }
 
+/// Why a differencing image refuses a write, until its write path lands.
+const NO_DIFFERENCING_WRITES: &str = "differencing images have no write path yet";
+
 fn vhd_to_fs_core_error(e: Error) -> fs_core::Error {
     match e {
         Error::Io(io) => fs_core::Error::Io(io),
         Error::OutOfBounds { offset, len, size } => {
             fs_core::Error::OutOfBounds { offset, len, size }
         }
-        Error::ReadOnly => fs_core::Error::ReadOnly,
+        Error::ReadOnly(_) => fs_core::Error::ReadOnly,
         other => fs_core::Error::Custom(other.to_string()),
     }
 }
@@ -1301,7 +1307,9 @@ fn fs_core_to_vhd_error(e: fs_core::Error) -> Error {
             std::io::ErrorKind::UnexpectedEof,
             format!("short read at {offset}: wanted {want} got {got}"),
         )),
-        fs_core::Error::ReadOnly => Error::ReadOnly,
+        fs_core::Error::ReadOnly => {
+            Error::ReadOnly("backing device refused the write as read-only")
+        }
         fs_core::Error::OutOfBounds { offset, len, size } => {
             Error::OutOfBounds { offset, len, size }
         }

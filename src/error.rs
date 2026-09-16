@@ -31,9 +31,13 @@ pub enum Error {
     ParentTooDeep,
     /// Differencing parent could not be located via any locator.
     ParentNotFound(String),
-    /// Write attempted on a reader opened read-only, or on a subtype that
-    /// hasn't grown a write path yet (differencing).
-    ReadOnly,
+    /// A write, or a read-write open, that cannot be honoured. The payload
+    /// names which of the causes it was, because they point at different
+    /// objects: the reader was opened read-only, the image's subtype has
+    /// no write path yet (differencing), or the caller's backing device is
+    /// not writable -- the only one of the three a caller can fix, and the
+    /// only one `open_rw_on_device` refuses at open time.
+    ReadOnly(&'static str),
     /// Backing-device error not otherwise classified (e.g. a custom
     /// `fs_core::Error::Custom` from a callback-backed device).
     Custom(String),
@@ -65,10 +69,7 @@ impl fmt::Display for Error {
             }
             Error::ParentTooDeep => write!(f, "differencing chain too deep (cycle?)"),
             Error::ParentNotFound(s) => write!(f, "differencing parent not found: {s}"),
-            Error::ReadOnly => write!(
-                f,
-                "VHD is read-only (opened RO, or write path not yet implemented for this subtype)"
-            ),
+            Error::ReadOnly(why) => write!(f, "VHD is read-only: {why}"),
             Error::Custom(s) => write!(f, "{s}"),
         }
     }

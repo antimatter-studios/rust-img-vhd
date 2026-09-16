@@ -68,8 +68,10 @@ FsCoreDevice *vhd_open_on_device(FsCoreDevice *inner);
 
 /*
  * Read-write variant of vhd_open_on_device. The input device must
- * report writable; otherwise the open fails with FS_CORE_READ_ONLY
- * and the input is freed.
+ * report writable; otherwise this returns NULL, the input is freed, and
+ * `fs_core_last_error_message()` says the backing device is not
+ * writable. Like every constructor here it returns a pointer, so no
+ * FS_CORE_* code is available for this failure.
  */
 FsCoreDevice *vhd_open_rw_on_device(FsCoreDevice *inner);
 
