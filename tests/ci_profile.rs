@@ -619,7 +619,17 @@ fn scan_shell(line: &str) -> ShellScan {
             // be the command's (`x="$(false)"` exits 1). It is recorded
             // as one this file does not follow, which is enough to stop
             // an EARLIER substitution being taken for the last one.
-            if q == '"' && (c == '`' || (c == '$' && chars.get(i + 1) == Some(&'('))) {
+            //
+            // `$((` IS ARITHMETIC, NOT A SUBSTITUTION, quoted as it is
+            // bare: `x=$(false) y="$((1+1))"` exits 1 (Greptile on
+            // rust-partitions#112). A substitution inside the arithmetic
+            // is still one, and is met on its own `$(` a few characters on.
+            if q == '"'
+                && (c == '`'
+                    || (c == '$'
+                        && chars.get(i + 1) == Some(&'(')
+                        && chars.get(i + 2) != Some(&'(')))
+            {
                 spans.push(None);
             }
             if c == q {
@@ -3227,6 +3237,8 @@ cargo build --locked --release
             "x=$(cargo test --locked --lib); echo after",
             "x=$((1+1)) y=$(cargo test --locked --lib)",
             "x=$(cargo test --locked --lib) y=$((1+1))",
+            "x=$(cargo test --locked --lib) y=\"$((1+1))\"",
+            "x=$(cargo test --locked --lib) y=\"a$((2*3))b\"",
             "x=$(cargo test --locked --lib) y=${z}",
             "x=$(cargo test --locked --lib;)",
         ];
@@ -3238,7 +3250,7 @@ cargo build --locked --release
                  command's, so the cargo test inside it gates the step"
             );
         }
-        assert_eq!(lines.len(), 13, "every shape above must have been examined");
+        assert_eq!(lines.len(), 15, "every shape above must have been examined");
     }
 
     /// AND THE SUBSTITUTIONS THAT DO SWALLOW IT, measured the same way:
@@ -3258,6 +3270,8 @@ cargo build --locked --release
             "env x=$(cargo test --locked --lib)",
             "x=$(cargo test --locked --lib) true",
             "x=$(cargo test --locked --lib) y=${z:-$(true)}",
+            // Arithmetic that runs a substitution: that one decides.
+            "x=$(cargo test --locked --lib) y=\"$((1+$(true; echo 1)))\"",
             "x=$(cargo test --locked --lib) y=\"$(true)\"",
             "x=$(cargo test --locked --lib) || true",
             "x=$(cargo test --locked --lib) && echo ok\necho after\n",
@@ -3271,7 +3285,7 @@ cargo build --locked --release
                 "{line:?}: the step's status does not depend on the suite's"
             );
         }
-        assert_eq!(lines.len(), 14, "every shape above must have been examined");
+        assert_eq!(lines.len(), 15, "every shape above must have been examined");
 
         // DELIBERATELY REFUSED, each a gate in bash: a quoted
         // substitution, a bare one whose output is redirected away, and
