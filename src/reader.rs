@@ -763,16 +763,27 @@ impl VhdReader {
             let mut bitmap = vec![0u8; bitmap_size as usize];
             self.dev_read(block_host_off, &mut bitmap)?;
 
-            // Within this block, walk sector by sector.
+            // Within this block, walk RUNS of sectors that share a
+            // bitmap bit: each run is one device read (or one deferral),
+            // not one per sector. A fully-present 2 MiB block used to be
+            // 4,096 reads of 512 bytes each.
             let mut block_cursor = in_block;
             let block_end = in_block + chunk_len as u64;
             while block_cursor < block_end {
                 let sector_in_block = block_cursor / SECTOR_SIZE;
                 let in_sector = block_cursor & (SECTOR_SIZE - 1);
-                let bytes_left_in_sector = SECTOR_SIZE - in_sector;
-                let slice_len =
-                    std::cmp::min(bytes_left_in_sector, block_end - block_cursor) as usize;
                 let bit_set = Self::bitmap_get(&bitmap, sector_in_block);
+                let last_sector = (block_end - 1) / SECTOR_SIZE;
+                let mut run_end_sector = sector_in_block + 1;
+                while run_end_sector <= last_sector
+                    && Self::bitmap_get(&bitmap, run_end_sector) == bit_set
+                {
+                    run_end_sector += 1;
+                }
+                let slice_len = std::cmp::min(
+                    run_end_sector * SECTOR_SIZE - block_cursor,
+                    block_end - block_cursor,
+                ) as usize;
 
                 let dst = &mut buf[written..written + slice_len];
                 if bit_set {
