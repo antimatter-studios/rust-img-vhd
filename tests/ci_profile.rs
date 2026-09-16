@@ -119,6 +119,9 @@ fn read_or_panic(path: &Path) -> String {
 /// `bash -e -c $'false && \\\necho done'` exits 1. The same split let
 /// `cargo test --locked \` + `--release` count as a debug run.
 ///
+/// A trailing `&&`, `||` or `|` continues the line as well; see the
+/// comment at that branch.
+///
 /// Only an ODD run of trailing backslashes continues (`a\\` ends in an
 /// escaped backslash), and a line whose text was cut at a comment never
 /// does: the backslash is inside the comment. Both measured with
@@ -141,7 +144,24 @@ fn command_lines(script: &str) -> Vec<String> {
             },
         };
         pending.push_str(text);
-        continuing = continues;
+        // A LIST OPERATOR AT THE END OF A LINE CONTINUES IT TOO, with no
+        // backslash: `a &&` / `a ||` / `a |` newline `b` is one list.
+        // Reading the next line as a fresh command made
+        //
+        //     test -n "$CI" &&
+        //     export EXPECT_OVERFLOW_CHECKS=1
+        //
+        // an unconditional export. The tokeniser decides, so a quoted
+        // or escaped `&&` does not continue anything. The two are joined
+        // with a space, which is all the newline was.
+        let ends_in_a_list_operator = !continues
+            && shell_commands(&pending)
+                .last()
+                .is_some_and(|(_, sep)| matches!(sep, Sep::And | Sep::Or | Sep::Pipe));
+        if ends_in_a_list_operator {
+            pending.push(' ');
+        }
+        continuing = continues || ends_in_a_list_operator;
         if continuing {
             continue;
         }
@@ -2505,6 +2525,9 @@ cargo build --locked --release
             "cargo test --locked --all-targets && \\\necho done\n",
             "cargo test --locked \\\n  --all-targets\n",
             "cd .. && \\\n  cargo test --locked --lib && \\\n  echo ok\n",
+            // A trailing `&&` continues the list with no backslash.
+            // Measured: `bash -e -c $'false &&\\necho done'` exits 1.
+            "cargo test --locked --all-targets &&\necho done\n",
         ] {
             assert_eq!(
                 runs_with_overflow_checks(script).len(),
@@ -2519,6 +2542,7 @@ cargo build --locked --release
             "cargo test --locked --lib && echo a\\\\\necho b\n",
             "cargo test --locked --lib && echo a # \\\necho b\n",
             "cargo test --locked --all-targets && \\\necho done\necho after\n",
+            "cargo test --locked --all-targets &&\necho done\necho after\n",
         ] {
             assert_eq!(
                 runs_with_overflow_checks(script),
@@ -3233,6 +3257,10 @@ mod handshake {
             "export EXPECT_OVERFLOW_CHECKS=1 &\ncargo test --locked --lib\n",
             // An export that may not run at all.
             "test -n \"$CI\" && export EXPECT_OVERFLOW_CHECKS=1\ncargo test --locked --lib\n",
+            // The same, with the list continued onto the next line:
+            // a line ending in `&&` or `||` is not the end of the list.
+            "test -n \"$CI\" &&\nexport EXPECT_OVERFLOW_CHECKS=1\ncargo test --locked --lib\n",
+            "true ||\nexport EXPECT_OVERFLOW_CHECKS=1\ncargo test --locked --lib\n",
             // An export undone before the suite runs.
             "export EXPECT_OVERFLOW_CHECKS=1\nunset EXPECT_OVERFLOW_CHECKS\ncargo test --locked --lib\n",
             "export EXPECT_OVERFLOW_CHECKS=1\nexport -n EXPECT_OVERFLOW_CHECKS\ncargo test --locked --lib\n",
@@ -3261,7 +3289,7 @@ mod handshake {
         }
         assert_eq!(
             scripts.len(),
-            19,
+            21,
             "every shape above must have been examined"
         );
     }
