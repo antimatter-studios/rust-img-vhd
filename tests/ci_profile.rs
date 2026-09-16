@@ -549,7 +549,24 @@ fn end_of_backticks(chars: &[char], open: usize) -> Option<usize> {
 /// workflow, loudly, with the command quoted. The other way round is a
 /// gate that went blind and said nothing.
 fn shell_commands(line: &str) -> Vec<(Vec<String>, Sep)> {
-    scan_shell(line).0
+    scan_shell(line).commands
+}
+
+/// What [`scan_shell`] reads from one line.
+struct ShellScan {
+    /// The commands, as [`shell_commands`] returns them.
+    commands: Vec<(Vec<String>, Sep)>,
+    /// For each command, in order, the command substitutions in its
+    /// words: `Some(inner text)` for a `$( )` or backtick span whose
+    /// status can be the command's, `None` for any expansion that runs
+    /// something whose status this file does not follow -- a process
+    /// substitution, a `${...}` carrying a substitution, a substitution
+    /// inside double quotes, or a span that never closes. An arithmetic
+    /// `$(( ))` is not recorded: it is not a command substitution and
+    /// does not change which one decides. See [`substitution_gates`].
+    substitutions: Vec<Vec<Option<String>>>,
+    /// Whether the line is PLAIN; see [`scan_shell`].
+    plain: bool,
 }
 
 /// [`shell_commands`], and whether the line is PLAIN: no bare `(`/`)`,
@@ -561,9 +578,11 @@ fn shell_commands(line: &str) -> Vec<(Vec<String>, Sep)> {
 /// can be believed. See [`exports_the_handshake`]. The answer comes from
 /// this tokeniser rather than from a second scan of the text, because
 /// two readers of one line must not have two grammars.
-fn scan_shell(line: &str) -> (Vec<(Vec<String>, Sep)>, bool) {
+fn scan_shell(line: &str) -> ShellScan {
     let chars: Vec<char> = line.chars().collect();
     let mut out: Vec<(Vec<String>, Sep)> = Vec::new();
+    let mut substitutions: Vec<Vec<Option<String>>> = Vec::new();
+    let mut spans: Vec<Option<String>> = Vec::new();
     let mut words: Vec<String> = Vec::new();
     let mut word = String::new();
     let mut started = false;
@@ -595,6 +614,13 @@ fn scan_shell(line: &str) -> (Vec<(Vec<String>, Sep)>, bool) {
             if q == '"' && c == '\\' && i + 1 < chars.len() {
                 i += 2;
                 continue;
+            }
+            // A substitution inside `"` still runs, and its status can
+            // be the command's (`x="$(false)"` exits 1). It is recorded
+            // as one this file does not follow, which is enough to stop
+            // an EARLIER substitution being taken for the last one.
+            if q == '"' && (c == '`' || (c == '$' && chars.get(i + 1) == Some(&'('))) {
+                spans.push(None);
             }
             if c == q {
                 quote = None;
@@ -632,10 +658,24 @@ fn scan_shell(line: &str) -> (Vec<(Vec<String>, Sep)>, bool) {
         if matches!(c, '$' | '<' | '>') && i + 1 < chars.len() && chars[i + 1] == '(' {
             started = true;
             i = match end_of_substitution(&chars, i + 1) {
-                Some(close) => close + 1,
+                Some(close) => {
+                    let inner: String = chars[i + 2..close].iter().collect();
+                    // Only `$( )` hands its status on. `<( )`/`>( )` run
+                    // something whose status nothing reads (`x=<(false)`
+                    // exits 0), and `$(( ))` is arithmetic, which is not
+                    // a command substitution at all and leaves the last
+                    // real one deciding (`x=$(false) y=$((1+1))` exits 1).
+                    if c != '$' {
+                        spans.push(None);
+                    } else if !inner.starts_with('(') {
+                        spans.push(Some(inner));
+                    }
+                    close + 1
+                }
                 // Unterminated: the shell would not accept this line at
                 // all, and there is no command after it to read.
                 None => {
+                    spans.push(None);
                     plain = false;
                     chars.len()
                 }
@@ -645,8 +685,12 @@ fn scan_shell(line: &str) -> (Vec<(Vec<String>, Sep)>, bool) {
         if c == '`' {
             started = true;
             i = match end_of_backticks(&chars, i) {
-                Some(close) => close + 1,
+                Some(close) => {
+                    spans.push(Some(chars[i + 1..close].iter().collect()));
+                    close + 1
+                }
                 None => {
+                    spans.push(None);
                     plain = false;
                     chars.len()
                 }
@@ -670,8 +714,19 @@ fn scan_shell(line: &str) -> (Vec<(Vec<String>, Sep)>, bool) {
         if c == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
             started = true;
             i = match end_of_braces(&chars, i + 1) {
-                Some(close) => close + 1,
+                Some(close) => {
+                    // A plain `${z}` runs nothing and leaves the status
+                    // alone (`x=$(false) y=${z}` exits 1); one carrying a
+                    // substitution runs it, and this file does not follow
+                    // it (`x=$(false) y=${z:-$(true)}` exits 0).
+                    let text: String = chars[i..=close].iter().collect();
+                    if text[2..].contains("$(") || text.contains('`') {
+                        spans.push(None);
+                    }
+                    close + 1
+                }
                 None => {
+                    spans.push(None);
                     plain = false;
                     chars.len()
                 }
@@ -714,6 +769,7 @@ fn scan_shell(line: &str) -> (Vec<(Vec<String>, Sep)>, bool) {
                 end_word!();
                 if !words.is_empty() {
                     out.push((std::mem::take(&mut words), sep));
+                    substitutions.push(std::mem::take(&mut spans));
                 }
                 i += if doubled && c != ';' { 2 } else { 1 };
             }
@@ -733,11 +789,16 @@ fn scan_shell(line: &str) -> (Vec<(Vec<String>, Sep)>, bool) {
     }
     if !words.is_empty() {
         out.push((words, Sep::End));
+        substitutions.push(spans);
     }
     if quote.is_some() {
         plain = false;
     }
-    (out, plain)
+    ShellScan {
+        commands: out,
+        substitutions,
+        plain,
+    }
 }
 
 /// The arguments of a `cargo test` invocation on this line, or `None`
@@ -1032,6 +1093,138 @@ fn status_is_read(
     true
 }
 
+/// Whether the `&&`/`||` list a command sits in can skip it while
+/// leaving the step green.
+///
+/// [`status_is_read`] looks only at what FOLLOWS a command, and a run
+/// the shell never starts was counted. `set -e` does not act on a
+/// failing command that is not the last of an `&&`/`||` list, so
+/// measured with `bash -e -c` and a `cargo` that records whether it ran:
+///
+/// ```text
+/// true || cargo test                          exit 0, never ran
+/// true || echo x | cargo test                 exit 0, never ran
+/// test -n "$CI" && cargo test ; echo done     exit 0, never ran (CI unset)
+/// test -n "$CI" && cargo test                 exit 1, never ran -- loud
+/// ```
+///
+/// The separator that decides is the one before the command's PIPELINE,
+/// because `|` binds tighter than `&&` and `||`:
+///
+/// - after `||` the run happens only if the left side failed, and when
+///   it succeeds the list is green. Refused always -- including
+///   `false || cargo test`, which bash does run, because whether the
+///   left side fails is not in the text;
+/// - after `&&` a skipped run leaves the list's status non-zero, which
+///   fails the step only if that status IS the step's: nothing but more
+///   `&&` after it, on the last line. `cd . && cargo test` followed by
+///   another line is refused for the same reason as `false ||`.
+fn list_can_skip(
+    commands: &[(Vec<String>, Sep)],
+    index: usize,
+    is_last_command_line: bool,
+) -> bool {
+    let before = commands[..index]
+        .iter()
+        .rev()
+        .map(|(_, sep)| *sep)
+        .find(|sep| *sep != Sep::Pipe);
+    match before {
+        Some(Sep::Or) => true,
+        Some(Sep::And) => {
+            !(is_last_command_line
+                && commands[index..]
+                    .iter()
+                    .all(|(_, sep)| matches!(sep, Sep::And | Sep::End)))
+        }
+        _ => false,
+    }
+}
+
+/// If this command is made only of assignments, the text of the command
+/// substitution whose status it hands on.
+///
+/// # A SUBSTITUTION THAT IS THE WHOLE COMMAND IS NOT SWALLOWED
+///
+/// Every substitution was treated as swallowing its status, and bash
+/// says otherwise: for a command with no program, the status is that of
+/// the LAST command substitution performed. Measured with `bash -e -c`,
+/// suite passing / failing:
+///
+/// ```text
+/// x=$(cargo test)                 0 / 1   gates
+/// x=$(true) y=$(cargo test)       0 / 1   gates
+/// x=$(cargo test) y=$(true)       0 / 0   the last one decides
+/// echo $(cargo test)              0 / 0   echo decides
+/// export x=$(cargo test)          0 / 0   export decides
+/// env x=$(cargo test)             127     env runs cargo's output
+/// $(cargo test)                   127     so does a bare substitution
+/// ```
+///
+/// The last two are why a substitution standing as the PROGRAM is not
+/// accepted: `cargo test` writes to stdout, the shell runs that text as
+/// a command, and the step fails whatever the suite did. Only a pure
+/// assignment qualifies, and only when its last substitution is one
+/// [`scan_shell`] could follow (`Some`); `x=$(cargo test) y="$(true)"`
+/// ends in a quoted one and is refused.
+fn whole_command_substitution<'a>(
+    words: &[String],
+    substitutions: &'a [Option<String>],
+) -> Option<&'a str> {
+    if words.is_empty() || !words.iter().all(|word| is_assignment(word)) {
+        return None;
+    }
+    substitutions.last()?.as_deref()
+}
+
+/// The `cargo test` commands inside a command substitution whose status
+/// becomes the substitution's.
+///
+/// ERREXIT IS OFF IN HERE. Bash does not pass `-e` into a substitution
+/// (`inherit_errexit` is off), so `;` DISCARDS a status here where it
+/// does not outside: `x=$(cargo test; true)` exits 0 with the suite
+/// failing. So the rule is simpler and stricter than the outer one: the
+/// run must be in the LAST list, with nothing after it but `&&`, not
+/// piped onward, not backgrounded, and not after `||`. Measured:
+/// `x=$(cargo test && echo ok)` and `x=$(echo x | cargo test)` gate;
+/// `x=$(cargo test | cat)` and `x=$(true || cargo test)` do not.
+///
+/// A substitution nested the same way (`x=$(y=$(cargo test))`) hands its
+/// status on too, and is followed.
+fn substitution_gates(script: &str) -> Vec<Vec<String>> {
+    let scan = scan_shell(script);
+    let commands = &scan.commands;
+    let Some(last) = commands.len().checked_sub(1) else {
+        return Vec::new();
+    };
+    // A trailing `;` ends the list as a newline would (`x=$(false;)`
+    // exits 1); a trailing `&` backgrounds it (`x=$(false &)` exits 0).
+    if !scan.plain || !matches!(commands[last].1, Sep::End | Sep::Semi) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (index, (words, _)) in commands.iter().enumerate() {
+        let decides = commands[index..last]
+            .iter()
+            .all(|(_, sep)| *sep == Sep::And)
+            && commands[..index]
+                .iter()
+                .rev()
+                .map(|(_, sep)| *sep)
+                .find(|sep| *sep != Sep::Pipe)
+                != Some(Sep::Or);
+        if !decides {
+            continue;
+        }
+        if cargo_test_arguments(words).is_some() {
+            out.push(words.clone());
+        } else if let Some(inner) = whole_command_substitution(words, &scan.substitutions[index]) {
+            out.extend(substitution_gates(inner));
+        }
+    }
+    out
+}
+
 /// Every `cargo test` invocation in a shell script that would be
 /// compiled with overflow checks on AND whose failure would be read.
 ///
@@ -1107,7 +1300,11 @@ fn debug_runs(script: &str, handshake_in_env: bool) -> Vec<DebugRun> {
     let mut exports_reach_the_shell = true;
     let mut out = Vec::new();
     for (line_index, line) in lines.iter().enumerate() {
-        let (commands, plain) = scan_shell(line);
+        let ShellScan {
+            commands,
+            substitutions,
+            plain,
+        } = scan_shell(line);
         if !plain {
             exports_reach_the_shell = false;
         }
@@ -1120,17 +1317,36 @@ fn debug_runs(script: &str, handshake_in_env: bool) -> Vec<DebugRun> {
             if opens_a_compound_command(words) {
                 exports_reach_the_shell = false;
             }
-            if !errexit_withdrawn && !profile_is_named {
-                if let Some(arguments) = cargo_test_arguments(words) {
-                    // Whether an `&&` chain's failure reaches the step
-                    // depends on nothing running after it -- on a later
-                    // line included.
-                    if !omits_the_library_unit_tests(&arguments)
-                        && status_is_read(&commands, index, line_index == last_line)
-                    {
-                        qualifies = true;
-                        receives_the_handshake |= handshake_prefix(words).0.unwrap_or(exported);
+            // Whether an `&&` chain's failure reaches the step depends on
+            // nothing running after it -- on a later line included -- and
+            // whether the run happens at all on what comes before it.
+            let is_last_command_line = line_index == last_line;
+            let decides_the_step = status_is_read(&commands, index, is_last_command_line)
+                && !list_can_skip(&commands, index, is_last_command_line);
+            if !errexit_withdrawn && !profile_is_named && decides_the_step {
+                // The run itself, or the runs inside a substitution whose
+                // status this command hands on.
+                let runs = if cargo_test_arguments(words).is_some() {
+                    vec![words.clone()]
+                } else {
+                    whole_command_substitution(words, &substitutions[index])
+                        .map(substitution_gates)
+                        .unwrap_or_default()
+                };
+                for run in runs {
+                    let Some(arguments) = cargo_test_arguments(&run) else {
+                        continue;
+                    };
+                    if omits_the_library_unit_tests(&arguments) {
+                        continue;
                     }
+                    qualifies = true;
+                    // A run inside a substitution inherits what the shell
+                    // has EXPORTED; the outer command's own assignments
+                    // are shell variables and do not reach it. Measured:
+                    // `EXPECT_OVERFLOW_CHECKS=1 x=$(cargo test ...)`
+                    // leaves `cargo` without the variable.
+                    receives_the_handshake |= handshake_prefix(&run).0.unwrap_or(exported);
                 }
             }
             // A WITHDRAWAL APPLIES WHEREVER IT SITS, conditional or in a
@@ -2849,7 +3065,9 @@ cargo build --locked --release
     fn a_cargo_test_inside_a_command_substitution_is_not_a_gate() {
         for line in [
             "echo $(cargo test --locked --lib)",
-            "OUT=$(cargo test --locked --lib)",
+            // `OUT=$(cargo test ...)` used to be listed here. It is the
+            // one shape that DOES read the status -- see
+            // `a_substitution_that_is_the_whole_command_is_a_gate`.
             "echo `cargo test --locked --lib`",
             "echo \"result: $(cargo test --locked --all-targets)\"",
             // PROCESS SUBSTITUTION IS THE SAME SWALLOWING. `<( … )`
@@ -2865,6 +3083,173 @@ cargo build --locked --release
                 runs_with_overflow_checks(line),
                 Vec::<String>::new(),
                 "{line}: the substitution swallows the status, only the outer command's is read"
+            );
+        }
+    }
+
+    /// A RUN THAT ITS OWN LIST CAN SKIP IS NOT A GATE.
+    ///
+    /// The status rule looked only at what FOLLOWS a `cargo test`, never
+    /// at what precedes it, so a run the shell never starts was counted.
+    /// Every verdict below is `bash -e -c` with `cargo` replaced by a
+    /// function that records that it ran and returns 0 or 1:
+    ///
+    /// | line | exit (pass / fail) | ran |
+    /// |---|---|---|
+    /// | `true \|\| cargo test` | 0 / 0 | no |
+    /// | `true \|\| echo x \| cargo test` | 0 / 0 | no |
+    /// | `test -n "$CI" && cargo test` + `echo done` (CI unset) | 0 / 0 | no |
+    /// | `test -n "$CI" && cargo test; echo done` (CI unset) | 0 / 0 | no |
+    /// | `false \|\| false && cargo test` + `echo done` | 0 / 0 | no |
+    ///
+    /// `set -e` does not act on a failing command that is not the last
+    /// in an `&&`/`||` list, so a skipped run leaves the step green
+    /// unless the list's own status is the step's.
+    #[test]
+    fn a_run_that_its_list_can_skip_does_not_count() {
+        let lines = [
+            "true || cargo test --locked --lib",
+            "true || echo x | cargo test --locked --lib",
+            "test -n \"$CI\" && cargo test --locked --lib\necho done\n",
+            "test -n \"$CI\" && cargo test --locked --lib; echo done",
+            "false || false && cargo test --locked --lib\necho done\n",
+            // Inside a substitution the same shapes, with no errexit
+            // at all: `x=$(true || cargo test)` exits 0 and never runs.
+            "x=$(true || cargo test --locked --lib)",
+        ];
+        for line in lines {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "skippable_run: {line:?} -- the list can skip the cargo test and still \
+                 leave the step green"
+            );
+        }
+        assert_eq!(lines.len(), 6, "every shape above must have been examined");
+
+        // DELIBERATELY REFUSED, and bash would gate each: a `||` whose
+        // left side fails, and an `&&` condition that holds. Whether it
+        // does is not in the text, and the spelling that holds on one
+        // runner is the skipping one on another.
+        for line in [
+            "false || cargo test --locked --lib",
+            "cd . && cargo test --locked --lib\necho done\n",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "over-strict on purpose: {line:?}"
+            );
+        }
+    }
+
+    /// THE ACCEPTANCE HALF: a condition whose failure IS the step's
+    /// status, and separators that do not make the run conditional.
+    /// `test -n "$CI" && cargo test` as the last line exits 1 when the
+    /// run is skipped -- loud, not silent.
+    #[test]
+    fn a_run_its_list_cannot_skip_silently_still_counts() {
+        for line in [
+            "test -n \"$CI\" && cargo test --locked --lib",
+            "cd .. && cargo test --locked --lib && echo ok",
+            "false || true && cargo test --locked --lib",
+            "echo x | cargo test --locked --lib",
+            "sleep 0 & cargo test --locked --lib",
+            "echo start; cargo test --locked --lib",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line:?}: a skipped run fails the step, or nothing can skip it"
+            );
+        }
+    }
+
+    /// A SUBSTITUTION THAT IS THE WHOLE COMMAND PASSES ITS STATUS ON.
+    ///
+    /// Bash: "if the command substitution is the only word, the exit
+    /// status is that of the substitution" -- and for a command made
+    /// only of assignments, the status is that of the LAST substitution
+    /// performed. The scanner treated every substitution as swallowing,
+    /// so each of these real gates was refused. Measured as above:
+    /// each exits 0 when the run passes and 1 when it fails.
+    ///
+    /// Inside the substitution errexit is OFF (bash does not inherit
+    /// it), so the run must be what decides the substitution's status:
+    /// last in its list, not piped onward, not after `;`.
+    #[test]
+    fn a_substitution_that_is_the_whole_command_is_a_gate() {
+        let lines = [
+            "x=$(cargo test --locked --lib)",
+            "OUT=$(cargo test --locked --lib)",
+            "x=$(echo x | cargo test --locked --lib)",
+            "x=`cargo test --locked --lib`",
+            "x=$(cargo test --locked --lib && echo ok)",
+            "x=$(true) y=$(cargo test --locked --lib)",
+            "x=a$(cargo test --locked --lib)b",
+            "x=$(y=$(cargo test --locked --lib))",
+            "x=$(cargo test --locked --lib); echo after",
+            "x=$((1+1)) y=$(cargo test --locked --lib)",
+            "x=$(cargo test --locked --lib) y=$((1+1))",
+            "x=$(cargo test --locked --lib) y=${z}",
+            "x=$(cargo test --locked --lib;)",
+        ];
+        for line in lines {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                vec![line.to_string()],
+                "whole_command_substitution: {line:?} -- the substitution's status is the \
+                 command's, so the cargo test inside it gates the step"
+            );
+        }
+        assert_eq!(lines.len(), 13, "every shape above must have been examined");
+    }
+
+    /// AND THE SUBSTITUTIONS THAT DO SWALLOW IT, measured the same way:
+    /// each exits 0 whether the run passes or fails (or, for `$(cargo
+    /// test)` alone and `env x=$(...)`, exits 127 either way -- the
+    /// run's own OUTPUT is executed as a command, so no status of the
+    /// suite's reaches the step).
+    #[test]
+    fn a_substitution_that_is_not_the_whole_status_is_not_a_gate() {
+        let lines = [
+            "echo $(cargo test --locked --lib)",
+            "$(cargo test --locked --lib)",
+            "x=$(cargo test --locked --lib; true)",
+            "x=$(cargo test --locked --lib | cat)",
+            "x=$(cargo test --locked --lib) y=$(true)",
+            "export x=$(cargo test --locked --lib)",
+            "env x=$(cargo test --locked --lib)",
+            "x=$(cargo test --locked --lib) true",
+            "x=$(cargo test --locked --lib) y=${z:-$(true)}",
+            "x=$(cargo test --locked --lib) y=\"$(true)\"",
+            "x=$(cargo test --locked --lib) || true",
+            "x=$(cargo test --locked --lib) && echo ok\necho after\n",
+            "x=$(cargo test --locked --lib &)",
+            "x=<(cargo test --locked --lib)",
+        ];
+        for line in lines {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line:?}: the step's status does not depend on the suite's"
+            );
+        }
+        assert_eq!(lines.len(), 14, "every shape above must have been examined");
+
+        // DELIBERATELY REFUSED, each a gate in bash: a quoted
+        // substitution, a bare one whose output is redirected away, and
+        // a process substitution beside the gating one. Recognising them
+        // means tracking quotes and output inside the span.
+        for line in [
+            "x=\"$(cargo test --locked --lib)\"",
+            "$(cargo test --locked --lib > /dev/null)",
+            "x=$(cargo test --locked --lib) y=<(true)",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "over-strict on purpose: {line:?}"
             );
         }
     }
@@ -3318,6 +3703,33 @@ mod handshake {
             super::line_assigns_the_handshake("FOO=1 export EXPECT_OVERFLOW_CHECKS=1"),
             "an assignment prefix does not stop `export` being the command"
         );
+    }
+
+    /// A RUN INSIDE A GATING SUBSTITUTION RECEIVES WHAT THE SHELL HAS
+    /// EXPORTED, OR ITS OWN PREFIX -- NOT THE OUTER ASSIGNMENTS, which
+    /// are shell variables. Measured with `cargo` reporting `printenv`.
+    #[test]
+    fn a_run_inside_a_substitution_receives_only_the_exported_handshake() {
+        for script in [
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(cargo test --locked --lib)\n",
+            "x=$(EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib)\n",
+        ] {
+            assert_eq!(
+                debug_runs_that_prove_the_build_traps(script).len(),
+                1,
+                "{script:?}: the cargo test process receives the variable"
+            );
+        }
+        for script in [
+            "EXPECT_OVERFLOW_CHECKS=1 x=$(cargo test --locked --lib)\n",
+            "x=$(export EXPECT_OVERFLOW_CHECKS=1)\ncargo test --locked --lib\n",
+        ] {
+            assert_eq!(
+                debug_runs_that_prove_the_build_traps(script),
+                Vec::<String>::new(),
+                "{script:?}: the cargo test process does not receive the variable"
+            );
+        }
     }
 
     /// The acceptance half of that call site: the same line shape with a
