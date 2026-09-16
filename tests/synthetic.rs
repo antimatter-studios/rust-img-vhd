@@ -934,12 +934,17 @@ fn dynamic_write_spanning_block_boundary_allocates_both() {
 /// Like `build_dynamic_vhd` but with both BAT entries marked unallocated.
 /// Used for tests that exercise the allocation path on first write.
 fn build_dynamic_vhd_all_sparse(path: &Path) {
+    // No allocated blocks: end-of-data == BAT_OFF + bat sector.
+    build_dynamic_vhd_all_sparse_ending_at(path, 512 * 5);
+}
+
+/// [`build_dynamic_vhd_all_sparse`] with the trailing footer at
+/// `END_OF_DATA` instead of sector 5, the gap left sparse.
+fn build_dynamic_vhd_all_sparse_ending_at(path: &Path, end_of_data: u64) {
     const SECTOR: u64 = 512;
     const FOOTER_OFF: u64 = 0;
     const DYN_HEADER_OFF: u64 = SECTOR;
     const BAT_OFF: u64 = SECTOR * 3;
-    // No allocated blocks: end-of-data == BAT_OFF + bat sector.
-    const END_OF_DATA: u64 = SECTOR * 5;
     const BLOCK_SIZE: u32 = 4096;
     const VIRT_SIZE: u64 = 8 * 1024;
 
@@ -959,13 +964,13 @@ fn build_dynamic_vhd_all_sparse(path: &Path) {
     bat[0..4].copy_from_slice(&BAT_UNALLOCATED.to_be_bytes());
     bat[4..8].copy_from_slice(&BAT_UNALLOCATED.to_be_bytes());
 
-    let total_with_footer = END_OF_DATA + FOOTER_SIZE as u64;
+    let total_with_footer = end_of_data + FOOTER_SIZE as u64;
     let mut f = File::create(path).unwrap();
     f.set_len(total_with_footer).unwrap();
     f.write_all_at(&footer, FOOTER_OFF).unwrap();
     f.write_all_at(&hdr, DYN_HEADER_OFF).unwrap();
     f.write_all_at(&bat, BAT_OFF).unwrap();
-    f.write_all_at(&footer, END_OF_DATA).unwrap();
+    f.write_all_at(&footer, end_of_data).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -2201,4 +2206,165 @@ fn a_working_directory_fixture_is_unique_and_removed_on_panic() {
         "{} was left behind by a panicking test",
         planted.display()
     );
+}
+
+// ---------------------------------------------------------------------------
+// A failed allocation keeps the trailing footer (#54)
+// ---------------------------------------------------------------------------
+
+/// A file device that refuses chosen writes, optionally after letting
+/// part of the buffer land -- a short write, which is what ENOSPC part
+/// way through a large write looks like.
+struct FailingWrites {
+    inner: fs_core::FileDevice,
+    /// `(offset, len)` of a write to refuse, and how many of its leading
+    /// bytes still reach the file first.
+    refuse: Box<dyn Fn(u64, usize) -> Option<usize> + Send + Sync>,
+}
+
+impl fs_core::BlockRead for FailingWrites {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+    fn size_bytes(&self) -> u64 {
+        fs_core::BlockRead::size_bytes(&self.inner)
+    }
+}
+
+impl fs_core::BlockDevice for FailingWrites {
+    fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+        if let Some(landed) = (self.refuse)(offset, buf.len()) {
+            if landed > 0 {
+                fs_core::BlockDevice::write_at(&self.inner, offset, &buf[..landed])?;
+            }
+            return Err(fs_core::Error::Custom("no space left on device".into()));
+        }
+        fs_core::BlockDevice::write_at(&self.inner, offset, buf)
+    }
+    fn flush(&self) -> fs_core::Result<()> {
+        fs_core::BlockDevice::flush(&self.inner)
+    }
+    fn is_writable(&self) -> bool {
+        true
+    }
+}
+
+/// The first allocation lands exactly on the trailing footer, and the
+/// footer used to be rewritten only as the last step: a write that
+/// failed anywhere after the zeroing began left a file with no footer,
+/// and before open learned to fall back to the offset-0 mirror, a file
+/// this reader refused to open at all (#54).
+#[test]
+fn a_first_allocation_that_fails_part_way_leaves_an_image_that_opens() {
+    let block_start = SPARSE_FIXTURE_END_OF_DATA;
+    type Refusal = Box<dyn Fn(u64, usize) -> Option<usize> + Send + Sync>;
+    let cases: [(&str, Refusal); 2] = [
+        (
+            "a short write while zeroing the new block",
+            Box::new(move |off, len| (off == block_start && len > 512).then_some(len - 512)),
+        ),
+        (
+            "the BAT entry write",
+            Box::new(|_, len| (len == 4).then_some(0)),
+        ),
+    ];
+    for (what, refuse) in cases {
+        let path = tmp_path("alloc_fails_keeps_footer");
+        build_dynamic_vhd_all_sparse(&path);
+        {
+            let dev = FailingWrites {
+                inner: fs_core::FileDevice::open_rw(&path).unwrap(),
+                refuse,
+            };
+            let r = VhdReader::open_rw_on_device(Arc::new(dev)).unwrap();
+            assert!(
+                r.write_at(0, &[0xAB; 16]).is_err(),
+                "{what}: the injected failure did not reach the caller"
+            );
+        }
+        // The trailing copy, not just "it opens": open now falls back to
+        // the offset-0 mirror, which would hide a footer this lost.
+        let bytes = std::fs::read(&*path).unwrap();
+        let tail = &bytes[bytes.len() - FOOTER_SIZE..];
+        assert_eq!(
+            &tail[..8],
+            FOOTER_COOKIE,
+            "{what}: the file no longer ends in a footer (len {})",
+            bytes.len()
+        );
+        let r = VhdReader::open(&path)
+            .unwrap_or_else(|e| panic!("{what}: the image no longer opens: {e:?}"));
+        let mut buf = [0xFFu8; 16];
+        r.read_at(0, &mut buf).unwrap();
+        assert_eq!(
+            buf, [0u8; 16],
+            "{what}: an unpublished block became readable"
+        );
+    }
+}
+
+/// A short write of the footer's new copy is written again, whole.
+///
+/// The copy extends the file, and a write that lands part of it -- ENOSPC
+/// mid-sector, say -- left the file ending at 7268 bytes: mid-sector, with
+/// no footer at its end. A block device cannot be truncated, so the repair
+/// is one more complete write over the same range, which here succeeds.
+#[test]
+fn a_short_write_of_the_new_footer_is_written_again_whole() {
+    let path = tmp_path("alloc_short_footer");
+    build_dynamic_vhd_all_sparse(&path);
+    let footer_at = SPARSE_FIXTURE_END_OF_DATA + SPARSE_FIXTURE_BLOCK_TOTAL;
+    let shorted = std::sync::atomic::AtomicBool::new(false);
+    {
+        let dev = FailingWrites {
+            inner: fs_core::FileDevice::open_rw(&path).unwrap(),
+            refuse: Box::new(move |off, len| {
+                (off == footer_at
+                    && len == FOOTER_SIZE
+                    && !shorted.swap(true, std::sync::atomic::Ordering::SeqCst))
+                .then_some(100)
+            }),
+        };
+        let r = VhdReader::open_rw_on_device(Arc::new(dev)).unwrap();
+        r.write_at(0, &[0xAB; 16])
+            .expect("the retried footer lets the write finish");
+    }
+    let bytes = std::fs::read(&*path).unwrap();
+    assert_eq!(
+        bytes.len() as u64,
+        file_len_after_allocations(1),
+        "the file ends mid-sector"
+    );
+    assert_eq!(&bytes[bytes.len() - FOOTER_SIZE..][..8], FOOTER_COOKIE);
+    let r = VhdReader::open(&path).unwrap();
+    let mut buf = [0u8; 16];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, [0xAB; 16]);
+}
+
+/// The one allocation `bat_entry_for` refuses outright: a block at host
+/// offset `2^41 - 512` would need the BAT's "absent" value. The refusal
+/// came after the block range -- which begins at the footer -- had been
+/// zeroed, so a refused write destroyed the image (#54). A sparse 2 TiB
+/// file; unix only, where `set_len` does not allocate it.
+#[cfg(unix)]
+#[test]
+fn an_allocation_refused_by_its_bat_entry_does_not_touch_the_image() {
+    let path = tmp_path("alloc_refused_keeps_footer");
+    let end_of_data = (1u64 << 41) - 512;
+    build_dynamic_vhd_all_sparse_ending_at(&path, end_of_data);
+    let before = std::fs::metadata(&*path).unwrap().len();
+    {
+        let r = VhdReader::open_rw(&path).unwrap();
+        let err = r
+            .write_at(0, &[0xAB; 16])
+            .expect_err("the sentinel offset is refused");
+        assert!(format!("{err:?}").contains("absent"), "got {err:?}");
+    }
+    assert_eq!(
+        std::fs::metadata(&*path).unwrap().len(),
+        before,
+        "a refused allocation changed the file's length"
+    );
+    VhdReader::open(&path).expect("a refused write must leave the image openable");
 }
