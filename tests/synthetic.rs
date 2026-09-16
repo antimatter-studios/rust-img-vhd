@@ -451,7 +451,10 @@ fn fixed_opened_read_only_is_not_writable() {
     assert!(!<VhdReader as fs_core::BlockDevice>::is_writable(&r));
     let buf = [0u8; 16];
     let err = r.write_at(0, &buf).unwrap_err();
-    assert!(matches!(err, vhd::Error::ReadOnly), "got {err:?}");
+    assert!(
+        matches!(err, vhd::Error::ReadOnly("reader was opened read-only")),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -482,7 +485,10 @@ fn dynamic_opened_read_only_rejects_writes() {
     assert!(!r.writable());
     let buf = [0u8; 16];
     let err = r.write_at(0, &buf).unwrap_err();
-    assert!(matches!(err, vhd::Error::ReadOnly), "got {err:?}");
+    assert!(
+        matches!(err, vhd::Error::ReadOnly("reader was opened read-only")),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -516,7 +522,13 @@ fn differencing_is_not_writable() {
     assert!(!r.writable());
     let buf = [0u8; 16];
     let err = r.write_at(0, &buf).unwrap_err();
-    assert!(matches!(err, vhd::Error::ReadOnly), "got {err:?}");
+    assert!(
+        matches!(
+            err,
+            vhd::Error::ReadOnly("differencing images have no write path yet")
+        ),
+        "got {err:?}"
+    );
 
     let _ = std::fs::remove_file(&child_path);
     let _ = std::fs::remove_file(&parent_path);
@@ -611,10 +623,41 @@ fn open_rw_on_device_rejects_readonly_inner() {
     }
     let dev = Arc::new(FileDevice::open(&path).unwrap()) as Arc<dyn fs_core::BlockDevice>;
     match VhdReader::open_rw_on_device(dev) {
-        Err(vhd::Error::ReadOnly) => {}
+        Err(vhd::Error::ReadOnly("backing device is not writable")) => {}
         Err(e) => panic!("expected ReadOnly, got error {e:?}"),
         Ok(_) => panic!("expected ReadOnly, got Ok"),
     }
+}
+
+/// The C entry point is where this refusal is observed, and all it can
+/// carry is NULL plus `fs_core_last_error_message()` -- there is no code.
+/// So the message has to name the cause the caller can act on: their own
+/// device is not writable. It used to say "opened RO, or write path not
+/// yet implemented for this subtype", pointing at the image instead.
+#[test]
+fn vhd_open_rw_on_device_says_the_backing_device_is_not_writable() {
+    use fs_core::ffi::{fs_core_last_error_message, FsCoreDevice};
+    use fs_core::FileDevice;
+    use std::ffi::CStr;
+    use std::sync::Arc;
+    let path = tmp_path("c_on_device_ro_inner");
+    {
+        let _r = VhdReader::create_fixed(&path, 4 * 1024).unwrap();
+    }
+    let ro = Arc::new(FileDevice::open(&path).unwrap()) as Arc<dyn fs_core::BlockDevice>;
+    let inner = FsCoreDevice::into_handle(ro);
+    let out = unsafe { vhd::capi::vhd_open_rw_on_device(inner) };
+    assert!(
+        out.is_null(),
+        "a read-only inner device was opened read-write"
+    );
+    let msg = unsafe { CStr::from_ptr(fs_core_last_error_message()) }
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        msg.contains("backing device is not writable"),
+        "the C caller is not told their device is the cause: {msg:?}"
+    );
 }
 
 #[test]

@@ -94,8 +94,10 @@ pub unsafe extern "C" fn vhd_open_on_device(inner: *mut FsCoreDevice) -> *mut Fs
 }
 
 /// Read-write variant of [`vhd_open_on_device`]. The input device must
-/// report `is_writable()`; otherwise the open fails with
-/// `FS_CORE_READ_ONLY` and the input is freed.
+/// report `is_writable()`; otherwise the open returns NULL, the input is
+/// freed, and `fs_core_last_error_message()` says the backing device is
+/// not writable. A pointer-returning constructor has no channel for an
+/// `FS_CORE_*` code, so none is promised here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vhd_open_rw_on_device(inner: *mut FsCoreDevice) -> *mut FsCoreDevice {
     unsafe { open_on_device(inner, true, "vhd_open_rw_on_device") }
