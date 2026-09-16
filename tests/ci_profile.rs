@@ -1113,6 +1113,17 @@ fn debug_runs(script: &str, handshake_in_env: bool) -> Vec<DebugRun> {
                     }
                 }
             }
+            // A WITHDRAWAL APPLIES WHEREVER IT SITS, conditional or in a
+            // subshell, and that asymmetry with `export` is deliberate.
+            // Whether `a && set +e` runs is not knowable from the text,
+            // and the spelling that matters is the one that DOES run on
+            // CI: `CI=true bash -e -c '[ -n "$CI" ] && set +e; false;
+            // echo R'` prints R and exits 0, and the same shape with
+            // `unset` leaves the suite without the variable. Believing
+            // only unconditional withdrawals would count both. So a
+            // skipped or subshelled `set +e`/`unset` refuses a gate that
+            // works -- loud, and the direction this file declares -- and
+            // `a_withdrawal_under_control_flow_is_still_applied` pins it.
             if set_disables_errexit(words) {
                 errexit_withdrawn = true;
             }
@@ -2969,6 +2980,36 @@ cargo build --locked --release
             Vec::<String>::new(),
             "over-strict on purpose: the guard does not track where `set -e` is live"
         );
+    }
+
+    /// AND THE WITHDRAWALS ARE BELIEVED EVEN UNDER CONTROL FLOW, which
+    /// refuses the skipped ones on purpose. See the comment in
+    /// `debug_runs`: the conditional that runs on CI is the one that
+    /// swallows the suite, and it cannot be told from the one that does
+    /// not.
+    #[test]
+    fn a_withdrawal_under_control_flow_is_still_applied() {
+        for script in [
+            "[ -n \"$CI\" ] && set +e\ncargo test --locked --lib\n",
+            "false && set +e\ncargo test --locked --lib\n",
+            "(set +e)\ncargo test --locked --lib\n",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(script),
+                Vec::<String>::new(),
+                "over-strict on purpose: {script:?}"
+            );
+        }
+        for script in [
+            "export EXPECT_OVERFLOW_CHECKS=1\n[ -n \"$CI\" ] && unset EXPECT_OVERFLOW_CHECKS\ncargo test --locked --lib\n",
+            "export EXPECT_OVERFLOW_CHECKS=1\nunset EXPECT_OVERFLOW_CHECKS | cat\ncargo test --locked --lib\n",
+        ] {
+            assert_eq!(
+                super::debug_runs_that_prove_the_build_traps(script),
+                Vec::<String>::new(),
+                "over-strict on purpose: {script:?}"
+            );
+        }
     }
 
     /// The near miss that the trailing space protects: `--tests` DOES
