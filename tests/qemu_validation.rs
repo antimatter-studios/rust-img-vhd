@@ -325,52 +325,118 @@ fn qemu_extracts_bytes_from_vhd_we_created() {
     );
 }
 
-/// Cross-write (geometry): qemu reads back a coherent virtual size from
-/// the footer our writer encoded into a fixed VHD.
+/// The reference tool's reading of `path` as if a CHS-deriving producer
+/// had written it: a copy with `creator_application` set to `"vpc "`
+/// (and the checksum recomputed), for which qemu-img takes the disk size
+/// from the footer's geometry rather than from `current_size`. For our
+/// own creator string, `"am  "`, it reads `current_size`. The creator
+/// field selects the reading deterministically, on one binary -- it is
+/// not a difference between qemu versions (#37).
+fn qemu_chs_derived_size(path: &Path) -> u64 {
+    let copy = vhd_path("chs-reading");
+    let mut bytes = std::fs::read(path).unwrap();
+    let at = bytes.len() - FOOTER_SIZE;
+    bytes[at + 28..at + 32].copy_from_slice(b"vpc ");
+    bytes[at + 64..at + 68].fill(0);
+    let sum = !bytes[at..]
+        .iter()
+        .fold(0u32, |a, &b| a.wrapping_add(b as u32));
+    bytes[at + 64..at + 68].copy_from_slice(&sum.to_be_bytes());
+    std::fs::write(&copy, &bytes).unwrap();
+    qemu_vpc_virtual_size(&copy)
+}
+
+/// Cross-write (geometry): both of the reference tool's readings of a
+/// fixed VHD we created agree with the size we created (#36, #37).
 ///
-/// vpc-specific quirk: the footer stores both the requested
-/// `current_size` (4 MiB here) AND a legacy CHS geometry. For 8192
-/// sectors the spec's CHS algorithm yields C=120, H=4, S=17 → 8160
-/// sectors = 4_177_920 bytes, 16_384 short of 4 MiB. qemu's `vpc`
-/// driver derives its reported `virtual-size` from this geometry, so
-/// older qemu reports the CHS-derived 4_177_920 while newer qemu
-/// (which prefers the footer's current-size) reports the full
-/// 4_194_304. Both are spec-correct readings of the *same* footer — the
-/// difference is a qemu-version behaviour, not a bug in our writer.
+/// A VHD footer carries the size twice -- `current_size` and a legacy
+/// CHS geometry -- and readers split on which to believe. The request
+/// is rounded up so the two agree (4 MiB -> 4,212,736 = 121/4/17, what
+/// `qemu-img create -f vpc x.vhd 4M` writes), so both readings must give
+/// the same number. Two single equalities, each asserted:
 ///
-/// We therefore accept either spec-legitimate value: the footer's
-/// current-size (`our_size`) or the CHS-derived size. Asserting a single
-/// hard equality against current-size would wrongly fail against the
-/// many qemu builds that report the CHS-rounded size (this is exactly
-/// what the CI runner does). The functional proof — qemu reads a
-/// coherent geometry out of the footer we produced — is preserved.
+/// - the geometry in the footer we wrote is `chs_for_size` of the size
+///   we created -- the check that needs no external opinion;
+/// - the reference tool reports that size reading `current_size` (our
+///   creator string) AND reading the geometry (a `"vpc "` copy).
+///
+/// This replaced a disjunction, `qemu_size == our_size || qemu_size ==
+/// chs_size`, which could not fail: our creator string always selects
+/// the first arm, so any geometry at all passed.
 #[test]
 fn qemu_reports_our_fixed_vhd_virtual_size() {
     let vhd = vhd_path("geom");
     const REQUESTED: u64 = 4 * 1024 * 1024;
+    // Spelled out rather than recomputed: 121 * 4 * 17 * 512, the size
+    // the reference tool itself creates for a 4 MiB request.
+    const CREATED: u64 = 4_212_736;
     let r = VhdReader::create_fixed(&vhd, REQUESTED).unwrap();
     let our_size = r.virtual_size();
     drop(r);
+    assert_eq!(our_size, CREATED, "the request rounds up to 121/4/17");
 
     assert_eq!(
-        our_size, REQUESTED,
-        "writer must keep the requested current-size"
+        footer_geometry(&vhd),
+        chs_for_size(our_size),
+        "the footer's geometry is not the ladder's geometry for the size created"
     );
+    assert_eq!(footer_geometry(&vhd), (121, 4, 17));
 
-    // 4 MiB is 8192 sectors; the spec's ladder answers C=120, H=4,
-    // S=17, so the geometry describes 8160 sectors. Spelled out rather
-    // than recomputed here — a number this test derives from the code
-    // under test cannot contradict it.
-    const CHS_DERIVED: u64 = 120 * 4 * 17 * 512; // 4_177_920
-    assert_eq!(CHS_DERIVED, 4_177_920);
-    let chs_size = CHS_DERIVED;
-
-    let qemu_size = qemu_vpc_virtual_size(&vhd);
-    assert!(
-        qemu_size == our_size || qemu_size == chs_size,
-        "qemu vpc virtual-size {qemu_size} must match either the footer's \
-         current-size {our_size} or its CHS-derived size {chs_size}",
+    assert_eq!(
+        qemu_vpc_virtual_size(&vhd),
+        our_size,
+        "the reference tool's current_size reading"
     );
+    assert_eq!(
+        qemu_chs_derived_size(&vhd),
+        our_size,
+        "the reference tool's CHS reading loses the tail of the image"
+    );
+}
+
+/// `create_fixed` makes the image the reference tool makes for the same
+/// request: same `current_size`, same geometry, for sizes on and off the
+/// ladder -- including below 34,816 bytes, where the unrounded geometry
+/// has zero cylinders and a CHS reading is an empty disk (#35) -- and the
+/// reference tool's CHS reading of ours is the whole disk.
+#[test]
+fn create_fixed_rounds_every_request_the_way_the_reference_tool_does() {
+    const MIB: u64 = 1024 * 1024;
+    for requested in [
+        512,
+        4096,
+        34_304,
+        34_816,
+        35_328,
+        MIB,
+        4 * MIB,
+        8 * MIB,
+        64 * MIB + 512,
+        512 * MIB,
+    ] {
+        let theirs = vhd_path(&format!("ref-{requested}"));
+        qemu_create(&theirs, &requested.to_string(), Some("fixed"));
+        let their_bytes = std::fs::metadata(&theirs).unwrap().len() - FOOTER_SIZE as u64;
+
+        let ours = vhd_path(&format!("ours-{requested}"));
+        let r = VhdReader::create_fixed(&ours, requested).unwrap();
+        assert_eq!(
+            r.virtual_size(),
+            their_bytes,
+            "{requested}: created size differs from the reference tool's"
+        );
+        drop(r);
+        assert_eq!(
+            footer_geometry(&ours),
+            footer_geometry(&theirs),
+            "{requested}: geometry differs from the reference tool's"
+        );
+        assert_eq!(
+            qemu_chs_derived_size(&ours),
+            their_bytes,
+            "{requested}: a CHS-deriving reader does not see the whole disk"
+        );
+    }
 }
 
 /// Cross-check (geometry): our CHS ladder against the reference tool's,

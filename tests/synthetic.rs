@@ -448,10 +448,12 @@ fn build_differencing_vhd(child_path: &Path, parent_path: &Path, bitmap: u8, chi
 #[test]
 fn create_fixed_round_trip_pattern() {
     let path = tmp_path("create_rt");
-    let virt_size = 64u64 * 1024;
-    let r = VhdReader::create_fixed(&path, virt_size).unwrap();
+    let r = VhdReader::create_fixed(&path, 64 * 1024).unwrap();
     assert_eq!(r.disk_type(), DiskType::Fixed);
-    assert_eq!(r.virtual_size(), virt_size);
+    // Rounded up to a size its geometry describes; see
+    // create_fixed_writes_a_geometry_that_describes_its_whole_size.
+    let virt_size = r.virtual_size();
+    assert!(virt_size >= 64 * 1024, "created smaller than requested");
     assert!(r.writable());
 
     // Write a pattern then read it back through a freshly opened RO reader.
@@ -465,6 +467,50 @@ fn create_fixed_round_trip_pattern() {
     r2.read_at(0, &mut buf).unwrap();
     assert_eq!(buf, pattern);
     assert_eq!(r2.virtual_size(), virt_size);
+}
+
+/// The footer's CHS geometry describes exactly `current_size` for every
+/// image `create_fixed` writes, so a reader that derives the disk size
+/// from C*H*S (Virtual PC; qemu-img for some creator strings) sees the
+/// same disk as one that reads `current_size`.
+///
+/// Requests the ladder cannot describe exactly are rounded UP to the
+/// smallest geometry that covers them -- what qemu-img does. Below 34,816
+/// bytes the ladder's answer for the request itself has zero cylinders,
+/// so without rounding the CHS reading is an empty disk (#35); above it,
+/// the CHS reading is short by up to a track (#36). The expected sizes
+/// are the ones `qemu-img create -f vpc -o subformat=fixed` writes.
+#[test]
+fn create_fixed_writes_a_geometry_that_describes_its_whole_size() {
+    for (requested, expected) in [
+        (512u64, 34_816u64),
+        (4096, 34_816),
+        (34_304, 34_816),
+        (34_816, 34_816),
+        (4 * 1024 * 1024, 4_212_736),
+        (8 * 1024 * 1024, 8_390_656),
+    ] {
+        let path = tmp_path(&format!("create_chs_{requested}"));
+        let r = VhdReader::create_fixed(&path, requested).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let footer = &bytes[bytes.len() - FOOTER_SIZE..];
+        let current = u64::from_be_bytes(footer[48..56].try_into().unwrap());
+        let c = u16::from_be_bytes([footer[56], footer[57]]) as u64;
+        let (h, s) = (footer[58] as u64, footer[59] as u64);
+        assert_eq!(
+            c * h * s * 512,
+            current,
+            "{requested}: geometry {c}/{h}/{s} describes {} bytes but current_size is {current}",
+            c * h * s * 512
+        );
+        assert_eq!(current, expected, "{requested}: current_size");
+        assert_eq!(r.virtual_size(), expected, "{requested}: virtual_size");
+        assert_eq!(
+            bytes.len() as u64,
+            expected + FOOTER_SIZE as u64,
+            "{requested}: the data area must match the size the footer declares"
+        );
+    }
 }
 
 #[test]
@@ -491,8 +537,8 @@ fn create_fixed_partial_write_within_bounds() {
 #[test]
 fn write_past_virtual_size_returns_out_of_bounds() {
     let path = tmp_path("create_oob");
-    let virt_size = 8u64 * 1024;
-    let r = VhdReader::create_fixed(&path, virt_size).unwrap();
+    let r = VhdReader::create_fixed(&path, 8 * 1024).unwrap();
+    let virt_size = r.virtual_size();
     let buf = vec![0u8; 16];
     let err = r.write_at(virt_size - 8, &buf).unwrap_err();
     assert!(matches!(err, vhd::Error::OutOfBounds { .. }), "got {err:?}");
@@ -501,8 +547,8 @@ fn write_past_virtual_size_returns_out_of_bounds() {
 #[test]
 fn write_into_footer_region_returns_out_of_bounds() {
     let path = tmp_path("create_footer_oob");
-    let virt_size = 8u64 * 1024;
-    let r = VhdReader::create_fixed(&path, virt_size).unwrap();
+    let r = VhdReader::create_fixed(&path, 8 * 1024).unwrap();
+    let virt_size = r.virtual_size();
     // Trying to write a single byte at virtual_size (== footer host offset)
     // must be rejected: that's footer territory.
     let buf = [0u8; 1];

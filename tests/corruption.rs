@@ -12,7 +12,10 @@ mod common;
 use common::{tmp_path_with, TempPath};
 use vhd::{Error, VhdReader};
 
-const VSIZE: u64 = 1024 * 1024; // 1 MiB fixed disk
+/// A fixed disk of about 1 MiB whose size its CHS geometry describes
+/// exactly (31/4/17 = 2108 sectors), so `create_fixed` creates it at
+/// exactly this size rather than rounding up and moving the footer.
+const VSIZE: u64 = 31 * 4 * 17 * 512;
 
 fn tmp_path(name: &str) -> TempPath {
     tmp_path_with("vhd_corrupt", name, "vhd")

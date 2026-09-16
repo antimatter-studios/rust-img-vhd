@@ -170,6 +170,44 @@ pub fn chs_for_size(size_bytes: u64) -> (u16, u8, u8) {
     )
 }
 
+/// The size a created image should have so that its CHS geometry
+/// describes it exactly: the request rounded UP to `C * H * S * 512`.
+///
+/// [`chs_for_size`] rounds DOWN, so writing a request's own geometry
+/// beside its `current_size` puts two different disk sizes in one
+/// footer. A reader that derives the size from CHS (Virtual PC always;
+/// qemu-img for some creator strings) then loses up to a track at the
+/// tail, and below 34,816 bytes -- where the ladder yields zero
+/// cylinders -- the whole disk. Rounding the request up makes the two
+/// fields agree by construction.
+///
+/// This is qemu-img's rule for `create -f vpc`: step the sector count
+/// up until the ladder's geometry for it covers the request, then use
+/// that geometry's size. `qemu-img create -f vpc x.vhd 4M` writes
+/// 4,212,736 bytes (121/4/17), and a 4 KiB request becomes 34,816
+/// (1/4/17).
+///
+/// A request larger than the most the geometry can address
+/// ([`chs::MAX_ADDRESSABLE_SECTORS`]) cannot be described exactly at
+/// any size and is returned unchanged. `size_bytes` must be a multiple
+/// of 512.
+pub fn size_with_exact_geometry(size_bytes: u64) -> u64 {
+    let wanted = size_bytes / SECTOR_SIZE;
+    let described = |sectors: u64| {
+        let (c, h, s) = chs_for_size(sectors * SECTOR_SIZE);
+        c as u64 * h as u64 * s as u64
+    };
+    let mut sectors = wanted;
+    while sectors <= chs::MAX_ADDRESSABLE_SECTORS {
+        let covered = described(sectors);
+        if covered >= wanted {
+            return covered * SECTOR_SIZE;
+        }
+        sectors += 1;
+    }
+    size_bytes
+}
+
 /// Generate a v4 (random) UUID per RFC 4122. Source of randomness:
 ///   1. `/dev/urandom` if available (Unix, macOS).
 ///   2. Fallback: a SplitMix64-style PRNG seeded from `SystemTime`.
@@ -231,6 +269,32 @@ fn fill_from_clock_prng(buf: &mut [u8]) {
 mod tests {
     use super::*;
     use crate::footer::Footer;
+
+    /// ABOVE THE CEILING THE SIZE IS KEPT AND THE GEOMETRY SATURATES
+    /// (review on #78). At the ceiling itself the geometry still describes
+    /// the disk exactly; one sector past it, the request comes back
+    /// unchanged and CHS reports the ceiling, as qemu-img writes for a
+    /// 200 GiB fixed VHD. A change that silently capped or refused such a
+    /// size, or started rounding it, fails here.
+    #[test]
+    fn a_size_above_the_chs_ceiling_is_kept_with_saturated_geometry() {
+        let ceiling = chs::MAX_ADDRESSABLE_SECTORS * SECTOR_SIZE;
+        assert_eq!(chs_for_size(ceiling), (65535, 16, 255));
+        assert_eq!(size_with_exact_geometry(ceiling), ceiling);
+
+        for above in [ceiling + SECTOR_SIZE, 200 * (1u64 << 30)] {
+            assert_eq!(
+                size_with_exact_geometry(above),
+                above,
+                "a request above the ceiling is created at its own size"
+            );
+            assert_eq!(
+                chs_for_size(above),
+                (65535, 16, 255),
+                "and its geometry saturates at the maximum"
+            );
+        }
+    }
 
     #[test]
     fn built_footer_round_trips_through_parser() {
