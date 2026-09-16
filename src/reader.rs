@@ -88,6 +88,9 @@ pub struct VhdReader {
     /// and at the file tail for dynamic/differencing). Used to rewrite
     /// the trailing footer after appending a new block.
     footer_bytes: [u8; FOOTER_SIZE],
+    /// Whether the trailing footer was unreadable and the footer came
+    /// from the mirror at offset 0 instead.
+    footer_from_mirror: bool,
 }
 
 impl VhdReader {
@@ -151,7 +154,36 @@ impl VhdReader {
         let mut footer_bytes = [0u8; FOOTER_SIZE];
         dev.read_at(dev_size - FOOTER_SIZE as u64, &mut footer_bytes)
             .map_err(fs_core_to_vhd_error)?;
-        let footer = Footer::parse(&footer_bytes)?;
+        let (footer, footer_bytes, footer_from_mirror) = match Footer::parse(&footer_bytes) {
+            Ok(footer) => (footer, footer_bytes, false),
+            // A dynamic or differencing image keeps a copy of its footer
+            // at offset 0, and that copy is what survives a truncated
+            // copy or a failed write at the tail. Fall back to it only
+            // when the tail does not parse, and only when the copy
+            // describes a sparse image: a fixed image has no mirror, and
+            // its first sector is guest data. If the fallback fails too,
+            // report why the TAIL failed -- that is the footer the image
+            // was supposed to have.
+            Err(tail_err) => {
+                if dev_size < 2 * FOOTER_SIZE as u64 {
+                    return Err(tail_err);
+                }
+                let mut mirror_bytes = [0u8; FOOTER_SIZE];
+                dev.read_at(0, &mut mirror_bytes)
+                    .map_err(fs_core_to_vhd_error)?;
+                match Footer::parse(&mirror_bytes) {
+                    Ok(mirror)
+                        if matches!(
+                            mirror.disk_type,
+                            DiskType::Dynamic | DiskType::Differencing
+                        ) =>
+                    {
+                        (mirror, mirror_bytes, true)
+                    }
+                    _ => return Err(tail_err),
+                }
+            }
+        };
 
         let virtual_size = footer.current_size;
 
@@ -417,7 +449,16 @@ impl VhdReader {
             virtual_size,
             next_alloc_off: Mutex::new(next_alloc_off),
             footer_bytes,
+            footer_from_mirror,
         })
+    }
+
+    /// Whether this image's trailing footer was damaged and it was opened
+    /// from the footer mirror at offset 0 instead. A caller can tell a
+    /// healthy image from a recovered one with this; the bytes served are
+    /// the same either way.
+    pub fn footer_recovered_from_mirror(&self) -> bool {
+        self.footer_from_mirror
     }
 
     /// Create a fresh fixed-VHD at `path` with the given virtual size,
