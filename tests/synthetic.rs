@@ -18,7 +18,7 @@ use vhd::dynamic::{
 };
 use vhd::footer::{compute_checksum as footer_cs, FOOTER_COOKIE, FOOTER_SIZE};
 mod common;
-use common::{tmp_path_with, TempPath};
+use common::{cwd_path_with, tmp_path_with, TempPath};
 use vhd::{DiskType, VhdReader};
 
 fn tmp_path(name: &str) -> TempPath {
@@ -1635,18 +1635,30 @@ fn a_plain_parent_name_beside_the_child_still_opens() {
 /// threads.
 #[test]
 fn a_parent_only_in_the_working_directory_is_not_found() {
-    let name = "vhd_cwd_only_parent_5f3a.vhd";
-    let in_cwd = std::env::current_dir().unwrap().join(name);
-    // Not a TempPath: the point is that it is somewhere tmp_path is
-    // not. Removed at the end, and named distinctively enough that a
-    // leftover is recognisable.
+    // In the working directory, not the temp directory: the point is
+    // that it is somewhere tmp_path is not. Unique per process and per
+    // test so a concurrent run in the same checkout cannot delete it
+    // mid-test, and removed on drop so a panic cannot leave it behind.
+    let in_cwd = cwd_path_with("vhd_cwd_only_parent", "fixture", "vhd");
+    let name = in_cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("a unicode file name");
     build_fixed_parent(&in_cwd, [0x22u8; 16], 0xBB);
 
     let child = tmp_path("cwd_fallback_child");
     build_differencing_vhd_named(&child, name, [0x22u8; 16]);
 
+    // Without the parent actually in the working directory this test
+    // passes whatever the resolver does, so a missing fixture must be a
+    // failure rather than a vacuous green.
+    assert!(
+        in_cwd.exists(),
+        "the working-directory parent {} is gone before the open, so a \
+         refusal here would prove nothing",
+        in_cwd.display()
+    );
     let opened = VhdReader::open(&child);
-    let _ = std::fs::remove_file(&in_cwd);
 
     match opened {
         Err(vhd::Error::ParentNotFound(m)) => assert!(
@@ -1659,4 +1671,42 @@ fn a_parent_only_in_the_working_directory_is_not_found() {
         ),
         Err(e) => panic!("a working-directory parent gave {e:?}"),
     }
+}
+
+/// The working-directory fixture above is removed even when its test
+/// panics, and two of them never share a name.
+///
+/// It used to be a fixed name with a `remove_file` after the open, so a
+/// panic in a builder or in `open` left it in the repository, and two
+/// concurrent runs in one checkout deleted each other's fixture — which
+/// turned that test into a green that proved nothing.
+#[test]
+fn a_working_directory_fixture_is_unique_and_removed_on_panic() {
+    let first = cwd_path_with("vhd_cwd_guard", "probe", "vhd");
+    let second = cwd_path_with("vhd_cwd_guard", "probe", "vhd");
+    assert_ne!(
+        first.to_path_buf(),
+        second.to_path_buf(),
+        "two working-directory fixtures share a path"
+    );
+    assert_eq!(
+        first.parent(),
+        Some(std::env::current_dir().unwrap().as_path()),
+        "the fixture is not in the working directory"
+    );
+    drop(second);
+
+    let planted = first.to_path_buf();
+    let unwound = std::panic::catch_unwind(move || {
+        let guard = first;
+        std::fs::write(&*guard, b"planted").unwrap();
+        assert!(guard.exists());
+        panic!("a builder panicked after planting the fixture");
+    });
+    assert!(unwound.is_err(), "the probe did not panic");
+    assert!(
+        !planted.exists(),
+        "{} was left behind by a panicking test",
+        planted.display()
+    );
 }
