@@ -104,17 +104,58 @@ fn read_or_panic(path: &Path) -> String {
 /// It is shell, not YAML: [`parse_workflow`] has already removed the
 /// workflow's own comments, and what reaches here is the inside of a
 /// `run:` block, where `#` is the shell's comment character.
-fn command_lines(script: &str) -> Vec<&str> {
-    script
-        .lines()
-        .map(str::trim_start)
-        .map(|line| match comment_start(line) {
-            Some(at) => &line[..at],
-            None => line,
-        })
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect()
+///
+/// # A LOGICAL LINE, NOT A PHYSICAL ONE
+///
+/// A line ending in an unescaped `\` continues onto the next: the shell
+/// removes the backslash-newline pair and reads one command. Splitting
+/// on physical lines made
+///
+///     cargo test --locked --all-targets && \
+///     echo done
+///
+/// an `&&` list followed by ANOTHER command on the next line, which is
+/// the swallowed shape, and the guard refused a correct gate. Measured:
+/// `bash -e -c $'false && \\\necho done'` exits 1. The same split let
+/// `cargo test --locked \` + `--release` count as a debug run.
+///
+/// Only an ODD run of trailing backslashes continues (`a\\` ends in an
+/// escaped backslash), and a line whose text was cut at a comment never
+/// does: the backslash is inside the comment. Both measured with
+/// `bash -e -c`.
+fn command_lines(script: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pending = String::new();
+    let mut continuing = false;
+    for raw in script.lines() {
+        // A continuation keeps its leading whitespace, which is what
+        // separates its first word from the previous line's last one.
+        let line = if continuing { raw } else { raw.trim_start() };
+        let (text, continues) = match comment_start(line) {
+            Some(at) => (&line[..at], false),
+            None => match line.strip_suffix('\\') {
+                Some(body) if body.chars().rev().take_while(|c| *c == '\\').count() % 2 == 0 => {
+                    (body, true)
+                }
+                _ => (line, false),
+            },
+        };
+        pending.push_str(text);
+        continuing = continues;
+        if continuing {
+            continue;
+        }
+        let logical = pending.trim();
+        if !logical.is_empty() {
+            out.push(logical.to_string());
+        }
+        pending.clear();
+    }
+    let logical = pending.trim();
+    if !logical.is_empty() {
+        out.push(logical.to_string());
+    }
+    out
 }
 
 /// Where a shell comment begins on a line, if it does.
@@ -167,11 +208,11 @@ fn comment_start(line: &str) -> Option<usize> {
     None
 }
 
-/// Whether a line turns `set -e` off.
+/// Whether one tokenised command is a `set` that turns `errexit` off.
 ///
 /// Actions runs a `run:` block as `bash -e`, so a failing command ends
 /// the step. `set +e` withdraws that for everything after it, which
-/// makes every command in the block advisory -- including the one this
+/// makes every later command in the block advisory -- including the one this
 /// file exists to require. Recognised in all its spellings (`set +e`,
 /// `set +ex`, `set +o errexit`) rather than as a fixed string.
 ///
@@ -185,13 +226,14 @@ fn comment_start(line: &str) -> Option<usize> {
 /// Sharing the tokeniser also settles the quoted case for free:
 /// `echo "set +o errexit"` yields the words `["echo", ""]`, so a
 /// printed withdrawal withdraws nothing.
-fn disables_errexit(line: &str) -> bool {
-    shell_commands(line)
-        .iter()
-        .any(|(words, _)| set_disables_errexit(words))
-}
-
-/// Whether one tokenised command is a `set` that turns `errexit` off.
+///
+/// # FROM WHERE IT RUNS, NOT FOR THE WHOLE SCRIPT
+///
+/// A `set +e` anywhere used to refuse every run in the block, including
+/// one that had already run under `errexit` -- and a failure there has
+/// already ended the step before the `set +e` is reached. Measured:
+/// `bash -e -c $'false\nset +e'` exits 1. So [`debug_runs`] walks the
+/// commands in order and withdraws only what follows.
 fn set_disables_errexit(words: &[String]) -> bool {
     let mut words = words.iter().map(String::as_str);
     if words.next() != Some("set") {
@@ -487,6 +529,19 @@ fn end_of_backticks(chars: &[char], open: usize) -> Option<usize> {
 /// workflow, loudly, with the command quoted. The other way round is a
 /// gate that went blind and said nothing.
 fn shell_commands(line: &str) -> Vec<(Vec<String>, Sep)> {
+    scan_shell(line).0
+}
+
+/// [`shell_commands`], and whether the line is PLAIN: no bare `(`/`)`,
+/// no quote left open at its end, no span that never closes.
+///
+/// The commands alone cannot say whether one of them runs in a subshell
+/// -- `(export X=1); cargo test` tokenises exactly like `export X=1;
+/// cargo test` -- and that is the one fact an `export` needs before it
+/// can be believed. See [`exports_the_handshake`]. The answer comes from
+/// this tokeniser rather than from a second scan of the text, because
+/// two readers of one line must not have two grammars.
+fn scan_shell(line: &str) -> (Vec<(Vec<String>, Sep)>, bool) {
     let chars: Vec<char> = line.chars().collect();
     let mut out: Vec<(Vec<String>, Sep)> = Vec::new();
     let mut words: Vec<String> = Vec::new();
@@ -494,6 +549,7 @@ fn shell_commands(line: &str) -> Vec<(Vec<String>, Sep)> {
     let mut started = false;
     let mut quote: Option<char> = None;
     let mut i = 0;
+    let mut plain = true;
 
     macro_rules! end_word {
         () => {
@@ -559,7 +615,10 @@ fn shell_commands(line: &str) -> Vec<(Vec<String>, Sep)> {
                 Some(close) => close + 1,
                 // Unterminated: the shell would not accept this line at
                 // all, and there is no command after it to read.
-                None => chars.len(),
+                None => {
+                    plain = false;
+                    chars.len()
+                }
             };
             continue;
         }
@@ -567,7 +626,10 @@ fn shell_commands(line: &str) -> Vec<(Vec<String>, Sep)> {
             started = true;
             i = match end_of_backticks(&chars, i) {
                 Some(close) => close + 1,
-                None => chars.len(),
+                None => {
+                    plain = false;
+                    chars.len()
+                }
             };
             continue;
         }
@@ -589,7 +651,10 @@ fn shell_commands(line: &str) -> Vec<(Vec<String>, Sep)> {
             started = true;
             i = match end_of_braces(&chars, i + 1) {
                 Some(close) => close + 1,
-                None => chars.len(),
+                None => {
+                    plain = false;
+                    chars.len()
+                }
             };
             continue;
         }
@@ -607,6 +672,9 @@ fn shell_commands(line: &str) -> Vec<(Vec<String>, Sep)> {
                 i += 1;
             }
             '&' | '|' | ';' | '(' | ')' => {
+                if matches!(c, '(' | ')') {
+                    plain = false;
+                }
                 // `2>&1` and `>&2`: an `&` bound to a redirection is
                 // part of the word, and the command's status is still
                 // read.
@@ -646,7 +714,10 @@ fn shell_commands(line: &str) -> Vec<(Vec<String>, Sep)> {
     if !words.is_empty() {
         out.push((words, Sep::End));
     }
-    out
+    if quote.is_some() {
+        plain = false;
+    }
+    (out, plain)
 }
 
 /// The arguments of a `cargo test` invocation on this line, or `None`
@@ -727,6 +798,17 @@ const OPTIONS_TAKING_A_VALUE: [&str; 18] = [
     "--config",
 ];
 
+/// Test-harness options that take their value as the NEXT argument,
+/// so that `-- --test-threads 1` is not read as a filter named `1`.
+const HARNESS_OPTIONS_TAKING_A_VALUE: [&str; 6] = [
+    "--test-threads",
+    "--color",
+    "--format",
+    "--logfile",
+    "--shuffle-seed",
+    "-Z",
+];
+
 /// Whether these arguments select something OTHER than the crate's
 /// library unit tests, where the overflow probe lives.
 ///
@@ -747,12 +829,48 @@ const OPTIONS_TAKING_A_VALUE: [&str; 18] = [
 /// guard. Whole arguments answer both spellings and the `--tests` near
 /// miss at once, with no space left load-bearing.
 ///
+/// # AND AFTER `--`, THE HARNESS'S OWN SELECTION
+///
 /// Everything after a bare `--` belongs to the test harness, not to
-/// cargo -- `-- --test-threads=1` selects no target -- so the walk
-/// stops there. A filter passed to the harness that way would still
-/// narrow the run; that is not covered, and the comment says so rather
-/// than the code implying otherwise.
+/// cargo -- `-- --test-threads=1` selects no target. The walk used to
+/// STOP there, and its comment admitted a filter passed that way would
+/// still narrow the run. It does, to nothing:
+/// `cargo test --locked --lib -- nonexistent_filter` builds the library,
+/// runs zero tests, exits 0, and counted as the required debug run.
+///
+/// So the harness arguments are walked too, by the same rule as cargo's:
+/// a bare word is a filter unless it is the value of an option that
+/// takes one ([`HARNESS_OPTIONS_TAKING_A_VALUE`]). `--ignored` (only
+/// `#[ignore]` tests), `--list` (none) and `--skip` (whatever matches
+/// its word, the probe included) narrow it without a filter, and a
+/// second `--` makes every word after it a filter. Unrecognised options
+/// such as `--nocapture` are accepted: none of them selects tests.
 fn omits_the_library_unit_tests(arguments: &[&str]) -> bool {
+    let mut harness = arguments.iter().skip_while(|a| **a != "--").skip(1);
+    let mut expecting_a_value = false;
+    while let Some(argument) = harness.next() {
+        if expecting_a_value {
+            expecting_a_value = false;
+            continue;
+        }
+        if *argument == "--" {
+            if harness.next().is_some() {
+                return true;
+            }
+            break;
+        }
+        if ["--ignored", "--list", "--skip"].contains(argument) || argument.starts_with("--skip=") {
+            return true;
+        }
+        if HARNESS_OPTIONS_TAKING_A_VALUE.contains(argument) {
+            expecting_a_value = true;
+            continue;
+        }
+        if !argument.starts_with('-') {
+            return true;
+        }
+    }
+
     let cargo_arguments = arguments.iter().take_while(|a| **a != "--");
     let mut expecting_a_value = false;
     for argument in cargo_arguments {
@@ -818,8 +936,8 @@ fn omits_the_library_unit_tests(arguments: &[&str]) -> bool {
 /// true without `-e`, false with it, and the sort of claim that has to
 /// be run rather than thought about.
 ///
-/// `set +e` is the caller's to handle, because it disqualifies the
-/// whole block rather than one line.
+/// `set +e` is the caller's to handle, because it withdraws `errexit`
+/// from every later command in the block rather than from one line.
 ///
 /// It stays STRICTER than bash in two places, and both are stated
 /// rather than accidental:
@@ -908,8 +1026,8 @@ fn status_is_read(
 /// could otherwise be satisfied by something that does not actually
 /// build the library in debug and fail loudly:
 ///
-/// - the script disables `set -e`, which makes every command in it
-///   advisory ([`disables_errexit`]);
+/// - an earlier command disables `set -e`, which makes every command
+///   after it advisory ([`set_disables_errexit`]);
 /// - it is a shell comment, or an inline trailing comment on an
 ///   otherwise-`--release` line ([`command_lines`]);
 /// - it does not invoke `cargo test` at all, only mentions it
@@ -917,41 +1035,104 @@ fn status_is_read(
 /// - it passes `--release`, or names a profile explicitly;
 /// - it sets a `CARGO_PROFILE_*` variable, which can turn overflow
 ///   checks off for the dev or test profile from outside the manifest;
-/// - it selects something other than the library unit tests
-///   ([`omits_the_library_unit_tests`]);
+/// - it selects something other than the library unit tests, before or
+///   after `--` ([`omits_the_library_unit_tests`]);
 /// - its exit status is discarded ([`status_is_read`]).
 ///
 /// A `cargo build` is not a `cargo test` and is not considered, nor is
 /// any step that invokes no cargo at all.
 fn runs_with_overflow_checks(script: &str) -> Vec<String> {
+    debug_runs(script, false)
+        .into_iter()
+        .map(|run| run.line)
+        .collect()
+}
+
+/// A logical line carrying a qualifying run, and whether a qualifying
+/// `cargo test` on it RECEIVES the handshake.
+#[derive(Debug)]
+struct DebugRun {
+    line: String,
+    receives_the_handshake: bool,
+}
+
+/// The one walk behind every scan of a `run:` block, in execution order.
+///
+/// # WHY ONE WALK, IN ORDER
+///
+/// Two facts here depend on WHERE a command sits, and both were decided
+/// for the whole block or the whole line instead:
+///
+/// - `set +e` refused every run in the block, including one that had
+///   already run under `errexit` (a false refusal);
+/// - the handshake armed every run in a STEP if any line in it assigned
+///   the variable, and every run on a LINE if any command on it did --
+///   so `cargo test --locked --lib; export EXPECT_OVERFLOW_CHECKS=1` and
+///   `EXPECT_OVERFLOW_CHECKS=1 echo x; cargo test --locked --lib` both
+///   counted as proving the build traps while the test process received
+///   no variable (a false pass, and the one that matters).
+///
+/// Walking the commands in order answers both the way the shell does.
+/// `exported` starts as whatever the step's `env:` mapping put in the
+/// environment, and a run receives the handshake from its own
+/// assignment prefix if it has one, otherwise from `exported` as it
+/// stands when the run starts.
+fn debug_runs(script: &str, handshake_in_env: bool) -> Vec<DebugRun> {
     let lines = command_lines(script);
-    if lines.iter().any(|line| disables_errexit(line)) {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
     let last_line = lines.len().saturating_sub(1);
+    let mut errexit_withdrawn = false;
+    let mut exported = handshake_in_env;
+    // Whether an `export` can still be believed to run in THIS shell.
+    // See [`exports_the_handshake`] for why this only ever goes false.
+    let mut exports_reach_the_shell = true;
+    let mut out = Vec::new();
     for (line_index, line) in lines.iter().enumerate() {
-        if line.contains("--release") || line.contains("--profile") {
-            continue;
+        let (commands, plain) = scan_shell(line);
+        if !plain {
+            exports_reach_the_shell = false;
         }
-        if line.contains("CARGO_PROFILE_") {
-            continue;
+        let profile_is_named = line.contains("--release")
+            || line.contains("--profile")
+            || line.contains("CARGO_PROFILE_");
+        let mut qualifies = false;
+        let mut receives_the_handshake = false;
+        for (index, (words, sep)) in commands.iter().enumerate() {
+            if opens_a_compound_command(words) {
+                exports_reach_the_shell = false;
+            }
+            if !errexit_withdrawn && !profile_is_named {
+                if let Some(arguments) = cargo_test_arguments(words) {
+                    // Whether an `&&` chain's failure reaches the step
+                    // depends on nothing running after it -- on a later
+                    // line included.
+                    if !omits_the_library_unit_tests(&arguments)
+                        && status_is_read(&commands, index, line_index == last_line)
+                    {
+                        qualifies = true;
+                        receives_the_handshake |= handshake_prefix(words).0.unwrap_or(exported);
+                    }
+                }
+            }
+            if set_disables_errexit(words) {
+                errexit_withdrawn = true;
+            }
+            // What this command does to the shell's environment applies
+            // to the commands AFTER it, so it is recorded last.
+            let unconditional = (index == 0 || commands[index - 1].1 == Sep::Semi)
+                && !matches!(sep, Sep::Pipe | Sep::Amp);
+            if exports_the_handshake(words) {
+                if exports_reach_the_shell && unconditional {
+                    exported = true;
+                }
+            } else if withdraws_the_handshake(words) {
+                exported = false;
+            }
         }
-        let commands = shell_commands(line);
-        for (index, (words, _)) in commands.iter().enumerate() {
-            let Some(arguments) = cargo_test_arguments(words) else {
-                continue;
-            };
-            if omits_the_library_unit_tests(&arguments) {
-                continue;
-            }
-            // Whether an `&&` chain's failure reaches the step depends
-            // on nothing running after it -- on a later line included.
-            if !status_is_read(&commands, index, line_index == last_line) {
-                continue;
-            }
-            out.push(line.to_string());
-            break;
+        if qualifies {
+            out.push(DebugRun {
+                line: line.clone(),
+                receives_the_handshake,
+            });
         }
     }
     out
@@ -1261,7 +1442,8 @@ fn scan_steps(workflow: &str, gating: bool, select: fn(&str) -> Vec<String>) -> 
         .collect()
 }
 
-/// Does this step ask the build to prove it traps an overflow?
+/// The runs in this step that ask the build to prove it traps an
+/// overflow.
 ///
 /// Either spelling counts, and both are the same instruction to
 /// Actions: the variable inline in the command, or declared in the
@@ -1284,18 +1466,26 @@ fn scan_steps(workflow: &str, gating: bool, select: fn(&str) -> Vec<String>) -> 
 /// Both workflow assertions passed on that and the process got no
 /// variable at all, leaving the runtime probe to return without
 /// asserting anything. [`command_lines`] is now the single grammar.
-fn step_declares_the_handshake(step: &Step) -> bool {
-    command_lines(&step.run)
-        .iter()
-        .any(|line| line_assigns_the_handshake(line))
-        || step
-            .env
-            .iter()
-            .any(|entry| entry == "EXPECT_OVERFLOW_CHECKS=1")
+///
+/// # AND IT IS A PROPERTY OF THE RUN, NOT OF THE STEP
+///
+/// This was `step_declares_the_handshake`, a yes/no for the whole step,
+/// and every run in an armed step then counted. So an assignment that
+/// prefixed a different command, or an export that ran after the suite,
+/// armed a `cargo test` whose process never received the variable. The
+/// env mapping is now the INITIAL environment of [`debug_runs`], which
+/// decides per run.
+fn step_runs_that_prove_the_build_traps(step: &Step) -> Vec<String> {
+    let handshake_in_env = step.env.iter().any(|entry| entry == HANDSHAKE);
+    debug_runs(&step.run, handshake_in_env)
+        .into_iter()
+        .filter(|run| run.receives_the_handshake)
+        .map(|run| run.line)
+        .collect()
 }
 
-/// Whether a shell line ASSIGNS the handshake, rather than mentioning
-/// it.
+/// Whether any command on a shell line ASSIGNS the handshake, rather
+/// than mentioning it.
 ///
 /// A `contains` over the line stood here, and `command_lines` had
 /// already removed comments -- but a printed mention is not a comment:
@@ -1309,16 +1499,23 @@ fn step_declares_the_handshake(step: &Step) -> bool {
 /// returned without asserting anything. The same defect as the comment
 /// grammar it replaced, one grammar later.
 ///
-/// AN ASSIGNMENT IS A PREFIX OF A COMMAND. Every word before it must be
-/// another `NAME=value` or `env`, which is exactly the shape
-/// [`cargo_test_arguments`] steps over. `echo EXPECT_OVERFLOW_CHECKS=1`
-/// is therefore not one: `echo` is not an assignment.
-///
-/// `export` is accepted with it, because `export VAR=1` on its own line
-/// followed by `cargo test` is a real spelling and refusing it would
-/// refuse a correct workflow. `set` is not: `set` does not assign.
+/// THIS ANSWERS WHAT A COMMAND DOES, NOT WHICH RUN IT REACHES. It is the
+/// per-command half, asked of a whole line so the tests can state its
+/// spellings; [`debug_runs`] asks the same two pieces --
+/// [`handshake_prefix`] and [`exports_the_handshake`] -- of each command
+/// in order, which is what decides whether a particular `cargo test`
+/// receives the variable.
+fn line_assigns_the_handshake(line: &str) -> bool {
+    shell_commands(line)
+        .iter()
+        .any(|(words, _)| command_assigns_the_handshake(words))
+}
+
+const HANDSHAKE_NAME: &str = "EXPECT_OVERFLOW_CHECKS";
+const HANDSHAKE: &str = "EXPECT_OVERFLOW_CHECKS=1";
+
 /// Whether one tokenised command puts the handshake into an
-/// ENVIRONMENT a later process receives.
+/// ENVIRONMENT a process receives.
 ///
 /// # AN ASSIGNMENT ON ITS OWN EXPORTS NOTHING
 ///
@@ -1333,9 +1530,7 @@ fn step_declares_the_handshake(step: &Step) -> bool {
 /// is a prefix with no command after it: bash sets a SHELL variable
 /// that the `cargo test` on the next line never sees. So the guard
 /// reported a probe that could not have run — the recurring defect,
-/// inside the guard written to close it. The doc this replaces reasoned
-/// about `export VAR=1` and about `echo VAR=1` and was silent on
-/// assignment-alone, which is how it survived five reviews.
+/// inside the guard written to close it.
 ///
 /// Three conditions, and the defect was the absence of the second:
 ///
@@ -1346,16 +1541,16 @@ fn step_declares_the_handshake(step: &Step) -> bool {
 ///    assignment is exported to the command it prefixes and to nothing
 ///    else, so with no command there is nothing to export to.
 /// 3. **Or an exporting builtin**, which puts it in the shell's own
-///    environment and so reaches every later command.
+///    environment and so reaches later commands
+///    ([`exports_the_handshake`]).
 ///
 /// # THE TEMPTING FIX IS TO REQUIRE `export`, AND IT WOULD BE WRONG
 ///
 /// `EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib` is the spelling
-/// this repository's own workflow uses and the one the guard exists to
-/// accept. `a_real_assignment_beside_a_run_on_one_line_still_counts`
-/// and `every_spelling_that_really_assigns_it_still_arms_the_step` are
-/// the acceptance arms, and `require_export` is the mutation that shows
-/// what requiring it costs.
+/// the guard exists to accept.
+/// `a_real_assignment_beside_a_run_on_one_line_still_counts` and
+/// `every_spelling_that_really_assigns_it_still_arms_the_step` are the
+/// acceptance arms.
 ///
 /// # WHAT IS DELIBERATELY STILL REFUSED
 ///
@@ -1376,26 +1571,27 @@ fn step_declares_the_handshake(step: &Step) -> bool {
 /// the unsafe direction, and no workflow here writes one. The four
 /// non-exporting spellings are already refused, because none of them is
 /// `export`, `env` or an assignment.
-fn line_assigns_the_handshake(line: &str) -> bool {
-    shell_commands(line)
-        .iter()
-        .any(|(words, _)| command_assigns_the_handshake(words))
+fn command_assigns_the_handshake(words: &[String]) -> bool {
+    if exports_the_handshake(words) {
+        return true;
+    }
+    // AND A COMMAND FOLLOWS. A command made only of assignments is the
+    // defect this function was changed for.
+    let (value, a_command_follows) = handshake_prefix(words);
+    value == Some(true) && a_command_follows
 }
 
-const HANDSHAKE: &str = "EXPECT_OVERFLOW_CHECKS=1";
-
-fn command_assigns_the_handshake(words: &[String]) -> bool {
-    // An exporting builtin reaches every later command, so where the
-    // assignment sits among its arguments does not matter. `export`
-    // with no arguments exports nothing, which `words[1..]` gives for
-    // free.
-    if words.first().map(String::as_str) == Some("export") {
-        return words[1..].iter().any(|word| word == HANDSHAKE);
-    }
-
-    // Otherwise it has to be an assignment PREFIX, and a prefix is
-    // exported to the command it prefixes.
-    let mut saw = false;
+/// The handshake's value in this command's assignment PREFIX, if the
+/// prefix sets it, and whether a command follows the prefix.
+///
+/// Every word before the program must be another `NAME=value` or `env`,
+/// which is exactly the shape [`cargo_test_arguments`] steps over, so
+/// `echo EXPECT_OVERFLOW_CHECKS=1` sets nothing: `echo` is the program.
+/// The LAST assignment to the name wins, as it does in the shell, and
+/// `EXPECT_OVERFLOW_CHECKS=0 cargo test` overrides an earlier export --
+/// which is why this answers a value rather than a yes.
+fn handshake_prefix(words: &[String]) -> (Option<bool>, bool) {
+    let mut value = None;
     let mut at = 0;
     while at < words.len() {
         let word = words[at].as_str();
@@ -1404,8 +1600,8 @@ fn command_assigns_the_handshake(words: &[String]) -> bool {
             continue;
         }
         if is_assignment(word) {
-            if word == HANDSHAKE {
-                saw = true;
+            if word.split_once('=').map(|(name, _)| name) == Some(HANDSHAKE_NAME) {
+                value = Some(word == HANDSHAKE);
             }
             at += 1;
             continue;
@@ -1414,10 +1610,110 @@ fn command_assigns_the_handshake(words: &[String]) -> bool {
         // rather than an assignment.
         break;
     }
-    // AND A COMMAND FOLLOWS. `at == words.len()` means the whole
-    // command was assignments, which is the defect this function was
-    // changed for.
-    saw && at < words.len()
+    (value, at < words.len())
+}
+
+/// Whether this command is an `export` of the handshake.
+///
+/// # `export` IS THE COMMAND EVEN BEHIND AN ASSIGNMENT PREFIX
+///
+/// Only a first word of `export` was recognised, so
+/// `FOO=1 export EXPECT_OVERFLOW_CHECKS=1` -- which bash runs as
+/// `export` with `FOO` set for its duration, and which does export the
+/// handshake (measured: a following `cargo` sees it) -- was refused.
+/// Assignments are stepped over. `env` is NOT: `env FOO=1 export ...`
+/// runs an external program called `export`, which does not exist, and
+/// could not touch this shell if it did.
+///
+/// Any option refuses it: `export -n EXPECT_OVERFLOW_CHECKS=1` sets the
+/// value and REMOVES the export, and a list of the harmless options is
+/// a list to keep up to date for no workflow that needs one.
+///
+/// # WHAT THIS DOES NOT DECIDE: WHETHER THE EXPORT REACHES THE RUN
+///
+/// That is [`debug_runs`]' job, because it depends on where the command
+/// sits. An export counts only if all of these hold, and each refusal is
+/// a spelling measured to leave the variable out of `cargo`'s
+/// environment:
+///
+/// - it runs BEFORE the `cargo test` (`cargo test ...; export ...`);
+/// - it is not conditional: first on its line or after a `;`, not after
+///   `&&`/`||` (`test -n "$CI" && export ...`);
+/// - it is not a pipeline member or backgrounded (`export ... | cat`,
+///   `export ... &`), both of which run in a subshell;
+/// - nothing from the top of the script up to it is a subshell, an
+///   unclosed quote or span, a heredoc, or a compound command
+///   ([`scan_shell`]'s PLAIN flag and [`opens_a_compound_command`]),
+///   because any of those can put it in a subshell or make it data --
+///   `(export ...)` and a heredoc body among them. This is coarser than
+///   the shell, in the refusing direction: an `if` anywhere above an
+///   export stops it counting, even where it would have run.
+/// - nothing between it and the run withdraws it
+///   ([`withdraws_the_handshake`]).
+fn exports_the_handshake(words: &[String]) -> bool {
+    let mut rest = words
+        .iter()
+        .map(String::as_str)
+        .skip_while(|word| is_assignment(word));
+    if rest.next() != Some("export") {
+        return false;
+    }
+    let mut value = None;
+    for word in rest {
+        if word.starts_with('-') && word != "--" {
+            return false;
+        }
+        if let Some((name, _)) = word.split_once('=') {
+            if name == HANDSHAKE_NAME {
+                value = Some(word == HANDSHAKE);
+            }
+        }
+    }
+    value == Some(true)
+}
+
+/// Whether a command that is not an exporting `export` touches the
+/// handshake's name at all -- `unset EXPECT_OVERFLOW_CHECKS`,
+/// `export -n EXPECT_OVERFLOW_CHECKS`, `EXPECT_OVERFLOW_CHECKS=0`, or a
+/// declaration builtin naming it.
+///
+/// Any such mention withdraws an earlier export for the runs after it.
+/// That over-reads some harmless commands (`echo EXPECT_OVERFLOW_CHECKS`
+/// withdraws it too), which is the refusing direction; the reverse would
+/// let `unset` leave a run counted as armed.
+fn withdraws_the_handshake(words: &[String]) -> bool {
+    let program = words
+        .iter()
+        .map(String::as_str)
+        .find(|word| !is_assignment(word));
+    let declares = matches!(
+        program,
+        Some("export" | "declare" | "typeset" | "local" | "readonly")
+    );
+    words.iter().any(|word| {
+        word == HANDSHAKE_NAME
+            || (word.starts_with("EXPECT_OVERFLOW_CHECKS=") && (word != HANDSHAKE || declares))
+    })
+}
+
+/// Words that begin, continue or end a compound command, where the
+/// shell's reading of an `export` inside depends on control flow and
+/// redirection this file does not track.
+const COMPOUND_WORDS: [&str; 17] = [
+    "{", "}", "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case",
+    "esac", "select", "function", "coproc",
+];
+
+/// Whether this command is part of a compound command, or opens a
+/// heredoc whose body the line splitter would read as commands. See
+/// [`exports_the_handshake`] for why an export after one is refused.
+fn opens_a_compound_command(words: &[String]) -> bool {
+    let program = words
+        .iter()
+        .map(String::as_str)
+        .find(|word| !is_assignment(word));
+    program.is_some_and(|program| COMPOUND_WORDS.contains(&program))
+        || words.iter().any(|word| word.contains("<<"))
 }
 
 /// `NAME=value`, the shape a shell reads as an assignment rather than a
@@ -1439,24 +1735,23 @@ fn gating_runs_with_overflow_checks(workflow: &str) -> Vec<String> {
     scan_steps(workflow, true, runs_with_overflow_checks)
 }
 
-/// The run commands of steps that both run in debug with the handshake
-/// AND actually gate a pull request.
+/// The runs that both run in debug with the handshake AND actually gate
+/// a pull request.
 ///
 /// Step-aware rather than text-aware, because the handshake may be
 /// declared in the step's `env:` mapping rather than inline in the
-/// command -- see [`step_declares_the_handshake`].
+/// command -- see [`step_runs_that_prove_the_build_traps`].
 fn gating_runs_that_prove_the_build_traps(workflow: &str) -> Vec<String> {
     collect_steps(workflow, true)
-        .into_iter()
-        .filter(step_declares_the_handshake)
-        .flat_map(|step| runs_with_overflow_checks(&step.run))
+        .iter()
+        .flat_map(step_runs_that_prove_the_build_traps)
         .collect()
 }
 
 /// The debug runs that ask the build to prove it traps an overflow.
 ///
-/// A subset of [`runs_with_overflow_checks`]: those which also set the
-/// `EXPECT_OVERFLOW_CHECKS` handshake, so that
+/// A subset of [`runs_with_overflow_checks`]: those whose `cargo test`
+/// process receives the `EXPECT_OVERFLOW_CHECKS` handshake, so that
 /// `overflow_checks::the_build_the_gate_asked_to_check_does_check`
 /// performs an overflow and fails if the build let it through.
 ///
@@ -1465,21 +1760,21 @@ fn gating_runs_that_prove_the_build_traps(workflow: &str) -> Vec<String> {
 /// a step is a misconfiguration and it fails loudly rather than
 /// quietly: the checks are legitimately off in release, so the
 /// assertion the handshake arms would fire there every time.
+///
 /// THE SECOND CALL SITE OF THE SAME QUESTION, and it needs its own
-/// witness. `step_declares_the_handshake` asks it of a step and this
-/// asks it of one command line; fixing only the first left this one a
-/// `contains`, and the suite stayed green because no test drove this
-/// path with a printed mention on the same line as a real run:
+/// witness. This used to filter whole lines with a `contains`, and then
+/// with [`line_assigns_the_handshake`], so a mention or an assignment
+/// ANYWHERE on the line armed a run elsewhere on it:
 ///
 ///     echo "EXPECT_OVERFLOW_CHECKS=1" && cargo test --locked --lib
+///     EXPECT_OVERFLOW_CHECKS=1 echo x; cargo test --locked --lib
 ///
-/// One line, so `runs_with_overflow_checks` hands the whole thing back
-/// as the command, `contains` matched, and the run counted as proving
-/// the build traps while the process received no variable.
+/// Both now go through [`debug_runs`], which decides per `cargo test`.
 fn debug_runs_that_prove_the_build_traps(script: &str) -> Vec<String> {
-    runs_with_overflow_checks(script)
+    debug_runs(script, false)
         .into_iter()
-        .filter(|command| line_assigns_the_handshake(command))
+        .filter(|run| run.receives_the_handshake)
+        .map(|run| run.line)
         .collect()
 }
 
@@ -1578,14 +1873,14 @@ jobs:
       - run: cargo test --locked --all-targets
       - run: cargo test --locked --all-targets -- --ignored
 ";
+    // The `-- --ignored` step runs ONLY `#[ignore]` tests, so the probe
+    // is not among them and it is not a debug run in this file's sense.
+    // See `omits_the_library_unit_tests`.
     assert_eq!(
         scan_steps(release_yml_as_it_is, false, runs_with_overflow_checks),
-        vec![
-            "cargo test --locked --all-targets".to_string(),
-            "cargo test --locked --all-targets -- --ignored".to_string(),
-        ],
-        "release.yml's real steps ARE debug runs -- the parser counts them, \
-         and the only reason they do not satisfy the guard is that the guard \
+        vec!["cargo test --locked --all-targets".to_string()],
+        "release.yml's plain step IS a debug run -- the parser counts it, \
+         and the only reason it does not satisfy the guard is that the guard \
          never opens that file"
     );
     assert!(
@@ -2119,6 +2414,130 @@ cargo build --locked --release
                 "{line} builds the library unit tests and must be counted"
             );
         }
+    }
+
+    /// A FILTER AFTER `--` NARROWS THE RUN AS MUCH AS ONE BEFORE IT.
+    ///
+    /// The selection walk stopped at `--`, on the reasoning that what
+    /// follows belongs to the test harness and selects no target. True,
+    /// and beside the point: the harness still takes a bare word as a
+    /// test-name filter, so `-- nonexistent_filter` builds the library,
+    /// runs ZERO tests, exits 0, and counted as the required debug run.
+    /// `--ignored` and `--list` are the same bypass without a filter:
+    /// the first runs only `#[ignore]` tests, the second runs nothing.
+    /// Measured against this very test binary: each shape below exits 0
+    /// having run no test at all (`--list` only prints the names), bar
+    /// `--skip`, which drops every test whose name contains its word and
+    /// so can drop the probe.
+    #[test]
+    fn a_harness_filter_after_the_separator_does_not_count() {
+        let lines = [
+            "cargo test --locked --lib -- nonexistent_filter",
+            "cargo test --locked --all-targets -- some::module",
+            "cargo test --locked --lib -- --exact some::test",
+            "cargo test --locked --lib -- --test-threads 1 some_filter",
+            "cargo test --locked --lib -- --skip overflow_checks",
+            "cargo test --locked --lib -- --ignored",
+            "cargo test --locked --lib -- --list",
+            "cargo test --locked --lib -- -- --nocapture",
+        ];
+        for line in lines {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "harness_filter_after_separator: {line} narrows the harness run, so the \
+                 overflow probe may never execute"
+            );
+            assert!(
+                selects_away_from_the_library(line),
+                "harness_filter_after_separator: {line} narrows what the harness runs"
+            );
+        }
+        assert_eq!(lines.len(), 8, "every shape above must have been examined");
+    }
+
+    /// THE ACCEPTANCE HALF: harness options that run every test, and
+    /// the values of the ones that take a separate value, are not
+    /// filters.
+    #[test]
+    fn harness_options_that_run_every_test_still_count() {
+        for line in [
+            "cargo test --locked --lib -- --test-threads=1",
+            "cargo test --locked --lib -- --test-threads 1",
+            "cargo test --locked --all-targets -- --nocapture",
+            "cargo test --locked --all-targets -- --include-ignored",
+            "cargo test --locked --lib -- --show-output --color always",
+            "cargo test --locked --lib -- --format terse --logfile test.log",
+            "cargo test --locked --lib --",
+        ] {
+            assert!(
+                !selects_away_from_the_library(line),
+                "{line} runs every library unit test"
+            );
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line} runs every library unit test and must be counted"
+            );
+        }
+    }
+
+    /// A LINE ENDING IN A BACKSLASH CONTINUES ONTO THE NEXT.
+    ///
+    /// `command_lines` split on physical lines, so an `&&` list wrapped
+    /// with `\` read as a list followed by ANOTHER command on the next
+    /// line -- which is the swallowed shape -- and a correct gate was
+    /// refused. Measured: `bash -e -c $'false && \\\necho done'` exits 1.
+    #[test]
+    fn a_continued_line_is_one_command() {
+        for script in [
+            "cargo test --locked --all-targets && \\\necho done\n",
+            "cargo test --locked \\\n  --all-targets\n",
+            "cd .. && \\\n  cargo test --locked --lib && \\\n  echo ok\n",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(script).len(),
+                1,
+                "{script:?} is one logical command whose failure ends the step"
+            );
+        }
+        // CONTROLS. An escaped backslash does not continue the line,
+        // and neither does one inside a comment, so each of these still
+        // puts a separate command after the `&&` list.
+        for script in [
+            "cargo test --locked --lib && echo a\\\\\necho b\n",
+            "cargo test --locked --lib && echo a # \\\necho b\n",
+            "cargo test --locked --all-targets && \\\necho done\necho after\n",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(script),
+                Vec::<String>::new(),
+                "{script:?}: the && list is followed by another command, so its status is replaced"
+            );
+        }
+    }
+
+    /// `set +e` WITHDRAWS `errexit` FROM WHAT FOLLOWS IT, NOT FROM WHAT
+    /// ALREADY RAN. A failing run before it has already ended the step:
+    /// `bash -e -c $'false\nset +e'` exits 1.
+    #[test]
+    fn set_plus_e_after_the_run_does_not_disqualify_it() {
+        for script in [
+            "cargo test --locked --all-targets\nset +e\necho cleanup\n",
+            "cargo test --locked --lib; set +e\n",
+            "cargo test --locked --lib\nset +o errexit\n",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(script).len(),
+                1,
+                "{script:?}: the suite ran under errexit"
+            );
+        }
+        // And before it, still refused.
+        assert_eq!(
+            runs_with_overflow_checks("echo x\nset +e\ncargo test --locked --lib\n"),
+            Vec::<String>::new(),
+        );
     }
 
     /// A single integration target is not the crate's arithmetic.
@@ -2741,6 +3160,97 @@ mod handshake {
         }
     }
 
+    /// THE HANDSHAKE HAS TO REACH THE `cargo test` PROCESS, NOT JUST
+    /// APPEAR SOMEWHERE ON ITS LINE OR IN ITS STEP.
+    ///
+    /// Arming was decided per physical line (and per step), so an
+    /// assignment that prefixed a DIFFERENT command, or an export that
+    /// ran AFTER the suite, armed a run whose process never received
+    /// the variable -- and the runtime probe returned without asserting
+    /// anything. Every script here was run under `bash -e -c` with
+    /// `cargo` replaced by a function that reports `printenv
+    /// EXPECT_OVERFLOW_CHECKS`: it reports the variable absent in each,
+    /// except `env FOO=1 export ...`, where the step dies at exit 127
+    /// before the suite runs at all. The acceptance scripts below were
+    /// measured the same way and each reports it present.
+    #[test]
+    fn a_handshake_that_does_not_reach_the_run_does_not_prove_anything() {
+        let scripts = [
+            // The two shapes filed.
+            "cargo test --locked --lib; export EXPECT_OVERFLOW_CHECKS=1\n",
+            "EXPECT_OVERFLOW_CHECKS=1 echo x; cargo test --locked --lib\n",
+            // The same two across a newline.
+            "cargo test --locked --lib\nexport EXPECT_OVERFLOW_CHECKS=1\n",
+            "EXPECT_OVERFLOW_CHECKS=1 echo x\ncargo test --locked --lib\n",
+            // A prefix on a non-qualifying run beside a qualifying one.
+            "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --no-run; cargo test --locked --lib\n",
+            // Exports that never reach the shell running the suite: a
+            // subshell, a pipeline member, a background job.
+            "(export EXPECT_OVERFLOW_CHECKS=1); cargo test --locked --lib\n",
+            "(\nexport EXPECT_OVERFLOW_CHECKS=1\n)\ncargo test --locked --lib\n",
+            "export EXPECT_OVERFLOW_CHECKS=1 | cat\ncargo test --locked --lib\n",
+            "export EXPECT_OVERFLOW_CHECKS=1 &\ncargo test --locked --lib\n",
+            // An export that may not run at all.
+            "test -n \"$CI\" && export EXPECT_OVERFLOW_CHECKS=1\ncargo test --locked --lib\n",
+            // An export undone before the suite runs.
+            "export EXPECT_OVERFLOW_CHECKS=1\nunset EXPECT_OVERFLOW_CHECKS\ncargo test --locked --lib\n",
+            "export EXPECT_OVERFLOW_CHECKS=1\nexport -n EXPECT_OVERFLOW_CHECKS\ncargo test --locked --lib\n",
+            // `export -n` sets the value and REMOVES the export.
+            "export -n EXPECT_OVERFLOW_CHECKS=1\ncargo test --locked --lib\n",
+            // The run's own prefix overrides the export, and the last
+            // assignment in a prefix wins.
+            "export EXPECT_OVERFLOW_CHECKS=1\nEXPECT_OVERFLOW_CHECKS=0 cargo test --locked --lib\n",
+            "EXPECT_OVERFLOW_CHECKS=1 EXPECT_OVERFLOW_CHECKS=0 cargo test --locked --lib\n",
+            // A compound command piped into something runs in a
+            // subshell, and its body's lines look like any others.
+            "if true; then\nexport EXPECT_OVERFLOW_CHECKS=1\nfi | cat\ncargo test --locked --lib\n",
+            "{\nexport EXPECT_OVERFLOW_CHECKS=1\n} | cat\ncargo test --locked --lib\n",
+            // `env` runs an external program; it cannot export into the shell.
+            "env FOO=1 export EXPECT_OVERFLOW_CHECKS=1\ncargo test --locked --lib\n",
+            // The body of a heredoc is data.
+            "cat <<EOF\nexport EXPECT_OVERFLOW_CHECKS=1\nEOF\ncargo test --locked --lib\n",
+        ];
+        for script in scripts {
+            assert_eq!(
+                debug_runs_that_prove_the_build_traps(script),
+                Vec::<String>::new(),
+                "handshake_must_reach_the_run: {script:?} -- the cargo test process never \
+                 receives EXPECT_OVERFLOW_CHECKS=1, so the runtime probe asserts nothing"
+            );
+        }
+        assert_eq!(
+            scripts.len(),
+            19,
+            "every shape above must have been examined"
+        );
+    }
+
+    /// THE ACCEPTANCE HALF: each of these really does hand the variable
+    /// to the `cargo test` process, including the `FOO=1 export` shape a
+    /// first-word-only `export` check refused.
+    #[test]
+    fn a_handshake_that_reaches_the_run_still_proves_it() {
+        for script in [
+            "EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib; echo done\n",
+            "echo start; EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+            "export EXPECT_OVERFLOW_CHECKS=1\ncargo test --locked --lib\n",
+            "export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib\n",
+            "set -euo pipefail\nexport RUST_BACKTRACE=1 EXPECT_OVERFLOW_CHECKS=1\ncd ..\ncargo test --locked --lib\n",
+            "FOO=1 export EXPECT_OVERFLOW_CHECKS=1\ncargo test --locked --lib\n",
+            "EXPECT_OVERFLOW_CHECKS=1 \\\n  cargo test --locked --lib\n",
+        ] {
+            assert_eq!(
+                debug_runs_that_prove_the_build_traps(script).len(),
+                1,
+                "{script:?}: the cargo test process receives EXPECT_OVERFLOW_CHECKS=1"
+            );
+        }
+        assert!(
+            super::line_assigns_the_handshake("FOO=1 export EXPECT_OVERFLOW_CHECKS=1"),
+            "an assignment prefix does not stop `export` being the command"
+        );
+    }
+
     /// The acceptance half of that call site: the same line shape with a
     /// real assignment still counts.
     #[test]
@@ -2758,7 +3268,22 @@ mod handshake {
             run: "cargo test --locked --lib\n".to_string(),
             env: vec!["EXPECT_OVERFLOW_CHECKS=1".to_string()],
         };
-        assert!(super::step_declares_the_handshake(&step));
+        assert_eq!(
+            super::step_runs_that_prove_the_build_traps(&step),
+            vec!["cargo test --locked --lib".to_string()]
+        );
+
+        // The mapping is the INITIAL environment, so the script can
+        // still take it away before the run.
+        let unset = super::Step {
+            keys: vec!["run".to_string(), "env".to_string()],
+            run: "unset EXPECT_OVERFLOW_CHECKS\ncargo test --locked --lib\n".to_string(),
+            env: vec!["EXPECT_OVERFLOW_CHECKS=1".to_string()],
+        };
+        assert!(
+            super::step_runs_that_prove_the_build_traps(&unset).is_empty(),
+            "the run starts after the variable was unset"
+        );
 
         let printed = super::Step {
             keys: vec!["run".to_string()],
@@ -2766,7 +3291,7 @@ mod handshake {
             env: Vec::new(),
         };
         assert!(
-            !super::step_declares_the_handshake(&printed),
+            super::step_runs_that_prove_the_build_traps(&printed).is_empty(),
             "a step whose only mention is printed is not armed"
         );
     }
@@ -3002,6 +3527,34 @@ mod gating {
                  it and the runtime probe asserts nothing: {block:?}"
             );
         }
+    }
+
+    /// THE WORKFLOW PATH OF THE SAME DEFECT. Arming was a property of the
+    /// STEP, so any line assigning the handshake armed every run in it.
+    #[test]
+    fn a_handshake_elsewhere_in_the_step_does_not_arm_the_run() {
+        for block in [
+            "      - run: |\n          cargo test --locked --lib; export EXPECT_OVERFLOW_CHECKS=1\n",
+            "      - run: |\n          EXPECT_OVERFLOW_CHECKS=1 echo x; cargo test --locked --lib\n",
+            "      - run: |\n          cargo test --locked --lib\n          export EXPECT_OVERFLOW_CHECKS=1\n",
+            "      - run: |\n          EXPECT_OVERFLOW_CHECKS=1 echo x\n          cargo test --locked --lib\n",
+        ] {
+            let yaml = GATING.replace(
+                "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+                block,
+            );
+            assert!(
+                gating_runs_that_prove_the_build_traps(&yaml).is_empty(),
+                "handshake_must_reach_the_run: the cargo test process never receives the \
+                 variable, so the runtime probe asserts nothing: {block:?}"
+            );
+        }
+        // Acceptance: an export BEFORE the run, in the same step, arms it.
+        let yaml = GATING.replace(
+            "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+            "      - run: |\n          export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
+        );
+        assert_eq!(gating_runs_that_prove_the_build_traps(&yaml).len(), 1);
     }
 
     /// THE ACCEPTANCE HALF: both real spellings still arm the step.
