@@ -310,12 +310,19 @@ impl VhdReader {
                     }
                     allocated.push(entry);
                 }
-                // Two entries at one address is an aliased image: a write
-                // through one virtual block silently changes another.
-                // One sort answers it.
+                // Two blocks sharing any byte is an aliased image: a write
+                // through one virtual block silently changes another, and
+                // one block's bitmap can be served as another's data.
+                // Each entry owns `block_total` bytes, not one sector, so
+                // equal entries are only the extreme case -- after one
+                // sort, neighbours must be at least a whole block apart.
+                // Real writers, this crate's allocator included, pack
+                // blocks exactly `block_total` apart, which `>=` accepts.
                 allocated.sort_unstable();
-                if allocated.windows(2).any(|w| w[0] == w[1]) {
-                    return Err(Error::Corrupt("two BAT entries name the same block"));
+                if allocated.windows(2).any(|w| {
+                    (w[1] as u64) * SECTOR_SIZE < (w[0] as u64) * SECTOR_SIZE + block_total
+                }) {
+                    return Err(Error::Corrupt("two BAT entries name overlapping blocks"));
                 }
 
                 let parent = if footer.disk_type == DiskType::Differencing {

@@ -1152,6 +1152,54 @@ fn two_bat_entries_naming_one_block_are_refused_at_open() {
     assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
+/// The canonical dynamic fixture with its BAT set to `entries` and its
+/// trailing footer moved to `footer_off`, so the data area is as long as
+/// the test needs. The old footer's sector is left behind as data.
+fn dynamic_with_bat_and_footer_at(name: &str, entries: [u32; 2], footer_off: u64) -> TempPath {
+    let path = tmp_path(name);
+    let block: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+    build_dynamic_vhd(&path, &block, 0xFF);
+    let bytes = std::fs::read(&path).unwrap();
+    let footer = bytes[bytes.len() - FOOTER_SIZE..].to_vec();
+    patch(&path, footer_off, &footer);
+    patch(&path, FIXTURE_BAT_OFFSET, &entries[0].to_be_bytes());
+    patch(&path, FIXTURE_BAT_OFFSET + 4, &entries[1].to_be_bytes());
+    path
+}
+
+#[test]
+fn two_bat_entries_whose_blocks_partially_overlap_are_refused_at_open() {
+    // Each entry owns bitmap + block = 512 + 4096 = 4608 bytes, nine
+    // sectors. Entries 4 and 5 are one sector apart: block 0 is
+    // [2048, 6656) and block 1 is [2560, 7168), so block 1's bitmap is
+    // block 0's first data sector and a write through either changes
+    // the other. Both lie inside the data area, so only a comparison of
+    // the extents -- not of the entries -- can see it. An equality scan
+    // opened this image and served block 1's bitmap as block 0's data.
+    let path = dynamic_with_bat_and_footer_at("bat_partial_overlap", [4, 5], 7168);
+    let err = VhdReader::open(&path)
+        .err()
+        .expect("two BAT entries one sector apart alias each other's bytes and must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}
+
+#[test]
+fn two_bat_entries_exactly_one_block_apart_are_accepted() {
+    // The boundary the overlap check must not cross: entries 4 and 13
+    // are nine sectors apart, exactly one bitmap + block, which is how
+    // this crate's own allocator packs blocks. The footer moves to
+    // 13 * 512 + 4608 = 11264 so block 1 ends where it begins.
+    let path = dynamic_with_bat_and_footer_at("bat_adjacent", [4, 13], 11264);
+    VhdReader::open(&path).expect("blocks packed end to end must open");
+
+    // And one sector closer is the first overlap.
+    let path = dynamic_with_bat_and_footer_at("bat_adjacent_minus_one", [4, 12], 11264);
+    let err = VhdReader::open(&path)
+        .err()
+        .expect("blocks eight sectors apart share a sector and must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}
+
 #[test]
 fn the_unmodified_fixture_still_opens_and_reads() {
     // The positive control for the four refusals above: the same

@@ -204,6 +204,59 @@ fn our_reader_matches_qemu_populated_pattern() {
     assert_eq!(buf, data, "byte mismatch reading qemu-produced VHD");
 }
 
+/// Several populated blocks, packed by the reference tool, still open
+/// and read back — the acceptance half of the BAT overlap walk (#55).
+///
+/// A 512 KiB pattern fits in one 2 MiB block, so the test above never
+/// hands us two allocated blocks. Here blocks 0, 1 and 3 carry data and
+/// block 2 is zero, so the tool allocates three blocks and packs them
+/// end to end. The test asserts that packing from the image's own BAT
+/// before opening it: without two entries exactly one block apart, an
+/// overlap check that was a sector too strict would pass here unseen.
+#[test]
+fn our_reader_opens_blocks_the_reference_tool_packed_end_to_end() {
+    const MIB: usize = 1024 * 1024;
+    let raw = raw_path("packed-src");
+    let vhd = vhd_path("packed-dst");
+
+    let mut data = pattern(8 * MIB);
+    data[4 * MIB..6 * MIB].fill(0);
+    std::fs::write(&raw, &data).unwrap();
+    qemu_convert_raw_to_vpc(&raw, &vhd);
+
+    let bytes = std::fs::read(&vhd).unwrap();
+    let be32 = |o: usize| u32::from_be_bytes(bytes[o..o + 4].try_into().unwrap());
+    let be64 = |o: usize| u64::from_be_bytes(bytes[o..o + 8].try_into().unwrap());
+    let footer = bytes.len() - FOOTER_SIZE;
+    let dyn_hdr = be64(footer + 16) as usize;
+    let bat = be64(dyn_hdr + 16) as usize;
+    let entries = be32(dyn_hdr + 28) as usize;
+    let block_size = be32(dyn_hdr + 32) as u64;
+    let bitmap = (block_size / 512).div_ceil(8).div_ceil(512) * 512;
+    let mut allocated: Vec<u64> = (0..entries)
+        .map(|i| be32(bat + 4 * i))
+        .filter(|&e| e != u32::MAX)
+        .map(|e| e as u64 * 512)
+        .collect();
+    allocated.sort_unstable();
+    assert!(
+        allocated.len() >= 2
+            && allocated
+                .windows(2)
+                .any(|w| w[1] - w[0] == bitmap + block_size),
+        "the reference tool did not pack two blocks end to end ({allocated:?}, \
+         block {block_size}, bitmap {bitmap}), so this image cannot witness the boundary"
+    );
+
+    let r = VhdReader::open(&vhd).expect("an image the reference tool packed must open");
+    let mut buf = vec![0u8; data.len()];
+    r.read_at(0, &mut buf).unwrap();
+    assert!(
+        buf == data,
+        "byte mismatch reading a multi-block qemu-produced VHD"
+    );
+}
+
 /// Cross-write (content): build a fixed VHD with our writer, write a
 /// payload, then have qemu convert it to raw and confirm the bytes
 /// survived. The strongest single check that our footer + fixed layout
