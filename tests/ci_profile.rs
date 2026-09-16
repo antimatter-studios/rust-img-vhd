@@ -619,7 +619,17 @@ fn scan_shell(line: &str) -> ShellScan {
             // be the command's (`x="$(false)"` exits 1). It is recorded
             // as one this file does not follow, which is enough to stop
             // an EARLIER substitution being taken for the last one.
-            if q == '"' && (c == '`' || (c == '$' && chars.get(i + 1) == Some(&'('))) {
+            //
+            // `$((` IS ARITHMETIC, NOT A SUBSTITUTION, quoted as it is
+            // bare: `x=$(false) y="$((1+1))"` exits 1 (Greptile on
+            // rust-partitions#112). A substitution inside the arithmetic
+            // is still one, and is met on its own `$(` a few characters on.
+            if q == '"'
+                && (c == '`'
+                    || (c == '$'
+                        && chars.get(i + 1) == Some(&'(')
+                        && chars.get(i + 2) != Some(&'(')))
+            {
                 spans.push(None);
             }
             if c == q {
@@ -669,6 +679,13 @@ fn scan_shell(line: &str) -> ShellScan {
                         spans.push(None);
                     } else if !inner.starts_with('(') {
                         spans.push(Some(inner));
+                    } else if runs_a_substitution(&inner) {
+                        // Arithmetic that runs a substitution: that one's
+                        // status is the command's
+                        // (`x=$(false) y=$(( $(true; echo 1) + 1 ))` exits
+                        // 0), and it is not followed (Greptile on
+                        // rust-img-vmdk#102).
+                        spans.push(None);
                     }
                     close + 1
                 }
@@ -720,7 +737,7 @@ fn scan_shell(line: &str) -> ShellScan {
                     // substitution runs it, and this file does not follow
                     // it (`x=$(false) y=${z:-$(true)}` exits 0).
                     let text: String = chars[i..=close].iter().collect();
-                    if text[2..].contains("$(") || text.contains('`') {
+                    if runs_a_substitution(&text[2..]) {
                         spans.push(None);
                     }
                     close + 1
@@ -1191,7 +1208,21 @@ fn whole_command_substitution<'a>(
 ///
 /// A substitution nested the same way (`x=$(y=$(cargo test))`) hands its
 /// status on too, and is followed.
-fn substitution_gates(script: &str) -> Vec<Vec<String>> {
+///
+/// Each run comes with what the substitution itself did to the handshake
+/// before it: `Some(false)` when a command withdrew it
+/// ([`withdraws_the_handshake`]), `Some(true)` when a later unconditional
+/// export put it back ([`exports_the_handshake`], by the same rule as
+/// outside), and `None` when nothing touched it, so the run has what the
+/// shell exported. The substitution inherits the shell's exports and can
+/// change them for the commands after, in either direction. Measured with
+/// `env | grep -c`: `export X=1; x=$(unset X; env)` gives 0 (Greptile on
+/// rust-img-qcow2#94); `export X=1; x=$(unset X; export X=1; env)` gives 1
+/// and so does `x=$(export X=1; env)` with nothing exported outside
+/// (Greptile on rust-img-vmdk#102); `x=$(false && export X=1; env)`,
+/// `x=$(export X=1 | cat; env)` and `x=$(unset X; y=$(export X=1); env)`
+/// give 0.
+fn substitution_gates(script: &str) -> Vec<(Vec<String>, Option<bool>)> {
     let scan = scan_shell(script);
     let commands = &scan.commands;
     let Some(last) = commands.len().checked_sub(1) else {
@@ -1203,7 +1234,22 @@ fn substitution_gates(script: &str) -> Vec<Vec<String>> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for (index, (words, _)) in commands.iter().enumerate() {
+    let mut handshake = None;
+    let mut exports_reach = true;
+    for (index, (words, sep)) in commands.iter().enumerate() {
+        let handshake_before = handshake;
+        if opens_a_compound_command(words) {
+            exports_reach = false;
+        }
+        let unconditional = (index == 0 || commands[index - 1].1 == Sep::Semi)
+            && !matches!(sep, Sep::Pipe | Sep::Amp);
+        if exports_the_handshake(words) {
+            if exports_reach && unconditional {
+                handshake = Some(true);
+            }
+        } else if withdraws_the_handshake(words) {
+            handshake = Some(false);
+        }
         let decides = commands[index..last]
             .iter()
             .all(|(_, sep)| *sep == Sep::And)
@@ -1217,9 +1263,13 @@ fn substitution_gates(script: &str) -> Vec<Vec<String>> {
             continue;
         }
         if cargo_test_arguments(words).is_some() {
-            out.push(words.clone());
+            out.push((words.clone(), handshake_before));
         } else if let Some(inner) = whole_command_substitution(words, &scan.substitutions[index]) {
-            out.extend(substitution_gates(inner));
+            out.extend(
+                substitution_gates(inner)
+                    .into_iter()
+                    .map(|(run, inner)| (run, inner.or(handshake_before))),
+            );
         }
     }
     out
@@ -1327,13 +1377,13 @@ fn debug_runs(script: &str, handshake_in_env: bool) -> Vec<DebugRun> {
                 // The run itself, or the runs inside a substitution whose
                 // status this command hands on.
                 let runs = if cargo_test_arguments(words).is_some() {
-                    vec![words.clone()]
+                    vec![(words.clone(), None)]
                 } else {
                     whole_command_substitution(words, &substitutions[index])
                         .map(substitution_gates)
                         .unwrap_or_default()
                 };
-                for run in runs {
+                for (run, set_inside) in runs {
                     let Some(arguments) = cargo_test_arguments(&run) else {
                         continue;
                     };
@@ -1345,8 +1395,11 @@ fn debug_runs(script: &str, handshake_in_env: bool) -> Vec<DebugRun> {
                     // has EXPORTED; the outer command's own assignments
                     // are shell variables and do not reach it. Measured:
                     // `EXPECT_OVERFLOW_CHECKS=1 x=$(cargo test ...)`
-                    // leaves `cargo` without the variable.
-                    receives_the_handshake |= handshake_prefix(&run).0.unwrap_or(exported);
+                    // leaves `cargo` without the variable. Unless the
+                    // substitution withdrew or re-exported it before the run.
+                    receives_the_handshake |= handshake_prefix(&run)
+                        .0
+                        .unwrap_or(set_inside.unwrap_or(exported));
                 }
             }
             // A WITHDRAWAL APPLIES WHEREVER IT SITS, conditional or in a
@@ -1941,6 +1994,22 @@ fn withdraws_the_handshake(words: &[String]) -> bool {
         word == HANDSHAKE_NAME
             || (word.starts_with("EXPECT_OVERFLOW_CHECKS=") && (word != HANDSHAKE || declares))
     })
+}
+
+/// Whether `text` runs a command substitution: a backtick, or `$(` that is
+/// not the `$((` of arithmetic. A substitution inside arithmetic is still
+/// found, on its own `$(` further on.
+///
+/// Arithmetic is not a substitution and leaves the last real one deciding
+/// (`x=$(false) y=${z:-$((1+1))}` exits 1), so a plain `contains("$(")`
+/// took `$((` for one and refused a gate (Greptile on
+/// rust-partitions#112).
+fn runs_a_substitution(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.contains(&b'`')
+        || b.windows(3)
+            .any(|w| w[0] == b'$' && w[1] == b'(' && w[2] != b'(')
+        || b.ends_with(b"$(")
 }
 
 /// Words that begin, continue or end a compound command, where the
@@ -3191,7 +3260,10 @@ cargo build --locked --release
             "x=$(cargo test --locked --lib); echo after",
             "x=$((1+1)) y=$(cargo test --locked --lib)",
             "x=$(cargo test --locked --lib) y=$((1+1))",
+            "x=$(cargo test --locked --lib) y=\"$((1+1))\"",
+            "x=$(cargo test --locked --lib) y=\"a$((2*3))b\"",
             "x=$(cargo test --locked --lib) y=${z}",
+            "x=$(cargo test --locked --lib) y=${z:-$((1+1))}",
             "x=$(cargo test --locked --lib;)",
         ];
         for line in lines {
@@ -3202,7 +3274,7 @@ cargo build --locked --release
                  command's, so the cargo test inside it gates the step"
             );
         }
-        assert_eq!(lines.len(), 13, "every shape above must have been examined");
+        assert_eq!(lines.len(), 16, "every shape above must have been examined");
     }
 
     /// AND THE SUBSTITUTIONS THAT DO SWALLOW IT, measured the same way:
@@ -3222,6 +3294,10 @@ cargo build --locked --release
             "env x=$(cargo test --locked --lib)",
             "x=$(cargo test --locked --lib) true",
             "x=$(cargo test --locked --lib) y=${z:-$(true)}",
+            // Arithmetic that runs a substitution: that one decides.
+            "x=$(cargo test --locked --lib) y=\"$((1+$(true; echo 1)))\"",
+            "x=$(cargo test --locked --lib) N=$(( $(true; printf 1) + 1))",
+            "x=$(cargo test --locked --lib) y=$((1+`true; echo 1`))",
             "x=$(cargo test --locked --lib) y=\"$(true)\"",
             "x=$(cargo test --locked --lib) || true",
             "x=$(cargo test --locked --lib) && echo ok\necho after\n",
@@ -3235,7 +3311,7 @@ cargo build --locked --release
                 "{line:?}: the step's status does not depend on the suite's"
             );
         }
-        assert_eq!(lines.len(), 14, "every shape above must have been examined");
+        assert_eq!(lines.len(), 17, "every shape above must have been examined");
 
         // DELIBERATELY REFUSED, each a gate in bash: a quoted
         // substitution, a bare one whose output is redirected away, and
@@ -3713,6 +3789,18 @@ mod handshake {
         for script in [
             "export EXPECT_OVERFLOW_CHECKS=1\nx=$(cargo test --locked --lib)\n",
             "x=$(EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib)\n",
+            // A withdrawal is answered by the run's own prefix.
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(unset EXPECT_OVERFLOW_CHECKS; EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib)\n",
+            // ...or by exporting it again, which reaches the run (Greptile
+            // on rust-img-vmdk#102).
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(unset EXPECT_OVERFLOW_CHECKS; export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib)\n",
+            // An export inside the substitution reaches a run after it
+            // there, with nothing exported outside.
+            "x=$(export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib)\n",
+            "x=$(y=$(export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib))\n",
+            // The innermost change wins: withdrawn outside the nested
+            // substitution, exported again inside it.
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(unset EXPECT_OVERFLOW_CHECKS; y=$(export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib))\n",
         ] {
             assert_eq!(
                 debug_runs_that_prove_the_build_traps(script).len(),
@@ -3723,6 +3811,15 @@ mod handshake {
         for script in [
             "EXPECT_OVERFLOW_CHECKS=1 x=$(cargo test --locked --lib)\n",
             "x=$(export EXPECT_OVERFLOW_CHECKS=1)\ncargo test --locked --lib\n",
+            // Withdrawn inside the substitution, before the run: an `unset`
+            // there leaves the suite without the exported variable.
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(unset EXPECT_OVERFLOW_CHECKS && cargo test --locked --lib)\n",
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(y=$(unset EXPECT_OVERFLOW_CHECKS; cargo test --locked --lib))\n",
+            // A re-export that may not run, or runs in a pipeline's subshell
+            // or a nested substitution, does not restore it.
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(unset EXPECT_OVERFLOW_CHECKS; false && export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib)\n",
+            "x=$(export EXPECT_OVERFLOW_CHECKS=1 | cat; cargo test --locked --lib)\n",
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(unset EXPECT_OVERFLOW_CHECKS; y=$(export EXPECT_OVERFLOW_CHECKS=1); cargo test --locked --lib)\n",
         ] {
             assert_eq!(
                 debug_runs_that_prove_the_build_traps(script),
