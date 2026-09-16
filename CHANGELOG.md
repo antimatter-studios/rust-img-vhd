@@ -16,6 +16,16 @@ never does.
   `vhd_open_rw_on_device` given a non-writable device was told the
   *image* might be an unimplemented subtype. The message now names the
   device (#69).
+- **`create_fixed` rounds the size up to one its CHS geometry describes
+  exactly**, as `qemu-img create -f vpc` does. The footer used to carry a
+  `current_size` equal to the request next to a geometry the spec ladder
+  rounds *down*, so a reader that sizes the disk from CHS (Virtual PC;
+  qemu-img for some creator strings) lost up to a track at the tail. Below
+  34,816 bytes the geometry had zero cylinders, so such a reader saw an
+  empty disk. A 4 MiB request now creates 4,212,736 bytes (121/4/17), and
+  anything up to 34,816 bytes creates 34,816 (1/4/17). The same applies to
+  `vhd_create_fixed` and `vhd_tool create-fixed`. Check `virtual_size()`
+  for the size created (#35, #36).
 
 ### Fixed
 

@@ -27,7 +27,7 @@
 use crate::dynamic::{DynamicHeader, BAT_UNALLOCATED, DYN_HEADER_SIZE};
 use crate::error::{Error, Result};
 use crate::footer::{DiskType, Footer, FOOTER_COOKIE, FOOTER_SIZE};
-use crate::footer_build::build_fixed_footer;
+use crate::footer_build::{build_fixed_footer, size_with_exact_geometry};
 use fs_core::{BlockDevice, FileDevice};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -496,7 +496,13 @@ impl VhdReader {
     ///   `[virtual_size_bytes of sparse zero][512-byte fixed footer]`
     ///
     /// `virtual_size_bytes` must be sector-aligned (a multiple of 512);
-    /// otherwise [`Error::Corrupt`] is returned. The data area is
+    /// otherwise [`Error::Corrupt`] is returned.
+    ///
+    /// The image is created at
+    /// [`size_with_exact_geometry`](crate::footer_build::size_with_exact_geometry)
+    /// of the request: rounded up, as qemu-img does, so the footer's CHS
+    /// geometry and `current_size` describe the same disk. Check
+    /// [`VhdReader::virtual_size`] on the result for the size created. The data area is
     /// allocated via [`std::fs::File::set_len`], which leaves the
     /// region sparse on filesystems that support it (APFS, ext4, NTFS,
     /// XFS, ZFS) — no explicit zero-fill is performed.
@@ -515,6 +521,7 @@ impl VhdReader {
             .truncate(true)
             .open(path.as_ref())?;
 
+        let virtual_size_bytes = size_with_exact_geometry(virtual_size_bytes);
         let total_len = virtual_size_bytes
             .checked_add(FOOTER_SIZE as u64)
             .ok_or(Error::Corrupt("create_fixed: size overflow"))?;

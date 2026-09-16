@@ -45,9 +45,12 @@ FsCoreDevice *vhd_open(const char *path);
 FsCoreDevice *vhd_open_rw(const char *path);
 
 /*
- * Create a fresh fixed-VHD at `path` of `virtual_size_bytes` bytes and
- * return a RW device handle. `virtual_size_bytes` must be a positive
- * multiple of 512.
+ * Create a fresh fixed-VHD at `path` of at least `virtual_size_bytes`
+ * bytes and return a RW device handle. `virtual_size_bytes` must be a
+ * positive multiple of 512. The size is rounded up to the nearest one
+ * the footer's CHS geometry describes exactly, as qemu-img does, so the
+ * disk may be slightly larger than requested; fs_core_device_size_bytes on the handle gives
+ * the size created.
  *
  * On failure returns NULL.
  */

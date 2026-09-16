@@ -73,8 +73,12 @@ fn cmd_create_fixed(args: &[String]) -> Result<(), String> {
         return Err("create-fixed: expected <file> <size>".into());
     }
     let size = parse_u64(&args[1])?;
-    VhdReader::create_fixed(&args[0], size).map_err(|e| e.to_string())?;
-    println!("created fixed VHD: {} ({} bytes virtual)", args[0], size);
+    let r = VhdReader::create_fixed(&args[0], size).map_err(|e| e.to_string())?;
+    println!(
+        "created fixed VHD: {} ({} bytes virtual)",
+        args[0],
+        r.virtual_size()
+    );
     Ok(())
 }
 

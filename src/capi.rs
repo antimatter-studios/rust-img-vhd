@@ -32,9 +32,12 @@ pub unsafe extern "C" fn vhd_open_rw(path: *const c_char) -> *mut FsCoreDevice {
     open_path(path, true, "vhd_open_rw")
 }
 
-/// Create a fresh fixed-VHD at `path` of `virtual_size_bytes` bytes and
-/// return a RW device handle. `virtual_size_bytes` must be a positive
-/// multiple of 512.
+/// Create a fresh fixed-VHD at `path` of at least `virtual_size_bytes`
+/// bytes and return a RW device handle. `virtual_size_bytes` must be a
+/// positive multiple of 512. The size is rounded up to the nearest one
+/// the footer's CHS geometry describes exactly, as qemu-img does, so the
+/// created disk can be slightly larger than requested; the handle's
+/// `fs_core_device_size_bytes` is the size created.
 ///
 /// On failure returns NULL; consult `fs_core_last_error_message()`.
 #[unsafe(no_mangle)]
