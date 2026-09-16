@@ -1191,7 +1191,15 @@ fn whole_command_substitution<'a>(
 ///
 /// A substitution nested the same way (`x=$(y=$(cargo test))`) hands its
 /// status on too, and is followed.
-fn substitution_gates(script: &str) -> Vec<Vec<String>> {
+///
+/// Each run comes with whether a command BEFORE it in the substitution
+/// withdraws the handshake ([`withdraws_the_handshake`]). The
+/// substitution inherits the shell's exports, and an `unset` inside it
+/// removes the variable before the run starts, so an export outside does
+/// not arm that run (Greptile on rust-img-qcow2#94). Measured:
+/// `export EXPECT_OVERFLOW_CHECKS=1; x=$(unset EXPECT_OVERFLOW_CHECKS &&
+/// printenv EXPECT_OVERFLOW_CHECKS)` finds nothing.
+fn substitution_gates(script: &str) -> Vec<(Vec<String>, bool)> {
     let scan = scan_shell(script);
     let commands = &scan.commands;
     let Some(last) = commands.len().checked_sub(1) else {
@@ -1203,7 +1211,10 @@ fn substitution_gates(script: &str) -> Vec<Vec<String>> {
         return Vec::new();
     }
     let mut out = Vec::new();
+    let mut withdrawn = false;
     for (index, (words, _)) in commands.iter().enumerate() {
+        let withdrawn_before = withdrawn;
+        withdrawn |= withdraws_the_handshake(words);
         let decides = commands[index..last]
             .iter()
             .all(|(_, sep)| *sep == Sep::And)
@@ -1217,9 +1228,13 @@ fn substitution_gates(script: &str) -> Vec<Vec<String>> {
             continue;
         }
         if cargo_test_arguments(words).is_some() {
-            out.push(words.clone());
+            out.push((words.clone(), withdrawn_before));
         } else if let Some(inner) = whole_command_substitution(words, &scan.substitutions[index]) {
-            out.extend(substitution_gates(inner));
+            out.extend(
+                substitution_gates(inner)
+                    .into_iter()
+                    .map(|(run, inner_withdrawn)| (run, withdrawn_before || inner_withdrawn)),
+            );
         }
     }
     out
@@ -1327,13 +1342,13 @@ fn debug_runs(script: &str, handshake_in_env: bool) -> Vec<DebugRun> {
                 // The run itself, or the runs inside a substitution whose
                 // status this command hands on.
                 let runs = if cargo_test_arguments(words).is_some() {
-                    vec![words.clone()]
+                    vec![(words.clone(), false)]
                 } else {
                     whole_command_substitution(words, &substitutions[index])
                         .map(substitution_gates)
                         .unwrap_or_default()
                 };
-                for run in runs {
+                for (run, withdrawn_inside) in runs {
                     let Some(arguments) = cargo_test_arguments(&run) else {
                         continue;
                     };
@@ -1345,8 +1360,11 @@ fn debug_runs(script: &str, handshake_in_env: bool) -> Vec<DebugRun> {
                     // has EXPORTED; the outer command's own assignments
                     // are shell variables and do not reach it. Measured:
                     // `EXPECT_OVERFLOW_CHECKS=1 x=$(cargo test ...)`
-                    // leaves `cargo` without the variable.
-                    receives_the_handshake |= handshake_prefix(&run).0.unwrap_or(exported);
+                    // leaves `cargo` without the variable. And not when the
+                    // substitution withdrew it before the run.
+                    receives_the_handshake |= handshake_prefix(&run)
+                        .0
+                        .unwrap_or(exported && !withdrawn_inside);
                 }
             }
             // A WITHDRAWAL APPLIES WHEREVER IT SITS, conditional or in a
@@ -3713,6 +3731,8 @@ mod handshake {
         for script in [
             "export EXPECT_OVERFLOW_CHECKS=1\nx=$(cargo test --locked --lib)\n",
             "x=$(EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib)\n",
+            // A withdrawal is answered by the run's own prefix.
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(unset EXPECT_OVERFLOW_CHECKS; EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib)\n",
         ] {
             assert_eq!(
                 debug_runs_that_prove_the_build_traps(script).len(),
@@ -3723,6 +3743,10 @@ mod handshake {
         for script in [
             "EXPECT_OVERFLOW_CHECKS=1 x=$(cargo test --locked --lib)\n",
             "x=$(export EXPECT_OVERFLOW_CHECKS=1)\ncargo test --locked --lib\n",
+            // Withdrawn inside the substitution, before the run: an `unset`
+            // there leaves the suite without the exported variable.
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(unset EXPECT_OVERFLOW_CHECKS && cargo test --locked --lib)\n",
+            "export EXPECT_OVERFLOW_CHECKS=1\nx=$(y=$(unset EXPECT_OVERFLOW_CHECKS; cargo test --locked --lib))\n",
         ] {
             assert_eq!(
                 debug_runs_that_prove_the_build_traps(script),
