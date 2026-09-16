@@ -26,7 +26,7 @@
 
 use crate::dynamic::{DynamicHeader, BAT_UNALLOCATED, DYN_HEADER_SIZE};
 use crate::error::{Error, Result};
-use crate::footer::{DiskType, Footer, FOOTER_SIZE};
+use crate::footer::{DiskType, Footer, FOOTER_COOKIE, FOOTER_SIZE};
 use crate::footer_build::build_fixed_footer;
 use fs_core::{BlockDevice, FileDevice};
 use std::fs::OpenOptions;
@@ -154,6 +154,10 @@ impl VhdReader {
         let mut footer_bytes = [0u8; FOOTER_SIZE];
         dev.read_at(dev_size - FOOTER_SIZE as u64, &mut footer_bytes)
             .map_err(fs_core_to_vhd_error)?;
+        // Whether the last sector still starts with the footer cookie:
+        // a footer damaged in place rather than truncated away, so that
+        // sector is known to be the footer's and never data.
+        let tail_has_cookie = footer_bytes.starts_with(FOOTER_COOKIE);
         let (footer, footer_bytes, footer_from_mirror) = match Footer::parse(&footer_bytes) {
             Ok(footer) => (footer, footer_bytes, false),
             // A dynamic or differencing image keeps a copy of its footer
@@ -323,12 +327,17 @@ impl VhdReader {
                 // Unless the footer came from the mirror. Then the last
                 // sector is either a damaged footer or -- when the file
                 // was truncated by its footer -- the end of the last
-                // block, and nothing here can tell which. Both are
-                // accepted: the data area runs to `dev_size`, and the
-                // tail goes after whichever is further out, the last
-                // block or the damaged footer's sector.
+                // block. A tail that still carries the cookie is the
+                // footer's sector, so the bound stays. Otherwise the two
+                // cannot be told apart by the bytes, and the data area
+                // runs to `dev_size`: a writer never puts a block over its
+                // own footer, and damage in place does not move the BAT,
+                // so a block reaching `dev_size` means the file was cut
+                // there (or the image was already corrupt). The tail goes
+                // after whichever is further out, the last block or the
+                // damaged footer's sector.
                 let next_alloc = dev_size.saturating_sub(FOOTER_SIZE as u64);
-                let data_end = if footer_from_mirror {
+                let data_end = if footer_from_mirror && !tail_has_cookie {
                     dev_size
                 } else {
                     next_alloc

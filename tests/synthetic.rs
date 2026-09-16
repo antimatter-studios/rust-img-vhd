@@ -1464,6 +1464,32 @@ fn an_unreadable_mirror_reports_the_trailing_footer_error() {
     assert!(matches!(err, vhd::Error::NotVhd), "got {err:?}");
 }
 
+/// A trailing footer damaged in place but still carrying its cookie is
+/// known to be the footer's sector, so a BAT block that runs into it is
+/// refused on the recovered image exactly as on a healthy one -- the
+/// widened bound for a truncated file does not let footer bytes be
+/// served as guest data.
+#[test]
+fn a_block_over_a_damaged_footer_that_kept_its_cookie_is_refused() {
+    let path = tmp_path("footer_cookie_block_over");
+    let block: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+    build_dynamic_vhd(&path, &block, 0xFF);
+    // Entry 6 puts block 0 at [3072, 7680): its last sector is the footer.
+    patch(&path, FIXTURE_BAT_OFFSET, &6u32.to_be_bytes());
+    let len = std::fs::metadata(&path).unwrap().len();
+    // Break the trailing footer's checksum, keep its cookie.
+    patch(
+        &path,
+        len - FOOTER_SIZE as u64 + 64,
+        &[0xDE, 0xAD, 0xBE, 0xEF],
+    );
+
+    let err = VhdReader::open(&path)
+        .err()
+        .expect("a block whose last sector is the (damaged) footer must be refused");
+    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+}
+
 /// With both copies gone there is nothing to recover from.
 #[test]
 fn a_dynamic_image_with_both_footers_damaged_is_refused() {
