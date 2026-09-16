@@ -264,6 +264,82 @@ fn dynamic_partial_bitmap_zero_fills_unset_sectors() {
     }
 }
 
+/// A `BlockDevice` over a file that counts `read_at` calls.
+struct CountingReads {
+    inner: fs_core::FileDevice,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl fs_core::BlockRead for CountingReads {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.read_at(offset, buf)
+    }
+    fn size_bytes(&self) -> u64 {
+        fs_core::BlockRead::size_bytes(&self.inner)
+    }
+}
+impl fs_core::BlockDevice for CountingReads {}
+
+/// Open `path` on a counting device, with the counter reset after open.
+fn open_counting(path: &Path) -> (VhdReader, Arc<CountingReads>) {
+    let dev = Arc::new(CountingReads {
+        inner: fs_core::FileDevice::open(path).unwrap(),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let r = VhdReader::open_on_device(dev.clone()).unwrap();
+    dev.reads.store(0, std::sync::atomic::Ordering::Relaxed);
+    (r, dev)
+}
+
+/// A run of present sectors is one device read, not one per sector.
+///
+/// `read_sparse` used to cap every `dev_read` at the end of the current
+/// sector, so a full read of a fully-present block cost one read per 512
+/// bytes plus the bitmap -- 4,097 reads for a 2 MiB block. Here the
+/// block is 4 KiB (8 sectors): one bitmap read and one data read.
+#[test]
+fn a_fully_present_block_is_read_in_one_device_read() {
+    let path = tmp_path("coalesce_full");
+    let block: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+    build_dynamic_vhd(&path, &block, 0xFF);
+    let (r, dev) = open_counting(&path);
+
+    let mut buf = vec![0u8; 4096];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, block);
+    assert_eq!(
+        dev.reads.load(std::sync::atomic::Ordering::Relaxed),
+        2,
+        "one bitmap read and one data read for eight present sectors"
+    );
+}
+
+/// Runs are split where the bitmap changes, and a run that starts or
+/// ends mid-sector reads exactly the requested bytes: sectors 0-3 are
+/// present, 4-7 are absent (zeros, no device read), and the request
+/// starts and ends inside a sector.
+#[test]
+fn a_mixed_block_reads_each_run_once_and_exactly() {
+    let path = tmp_path("coalesce_mixed");
+    let block: Vec<u8> = (0u8..=255u8).cycle().take(4096).collect();
+    build_dynamic_vhd(&path, &block, 0xF0);
+    let (r, dev) = open_counting(&path);
+
+    let (start, len) = (700usize, 3000usize);
+    let mut buf = vec![0xAAu8; len];
+    r.read_at(start as u64, &mut buf).unwrap();
+    let mut want = block[start..start + len].to_vec();
+    want[2048 - start..].fill(0);
+    assert_eq!(buf, want);
+    assert_eq!(
+        dev.reads.load(std::sync::atomic::Ordering::Relaxed),
+        2,
+        "one bitmap read and one read for the present run"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Differencing — child with one block over a fixed parent.
 // ---------------------------------------------------------------------------
