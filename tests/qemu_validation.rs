@@ -257,6 +257,50 @@ fn our_reader_opens_blocks_the_reference_tool_packed_end_to_end() {
     );
 }
 
+/// A reference-tool dynamic image whose trailing footer is zeroed opens
+/// from the mirror at offset 0, as it does in the reference tool; with
+/// the mirror zeroed too, both refuse (#38).
+///
+/// The reference tool's answer is asserted in both arms rather than
+/// assumed: that it refuses when both copies are gone is what shows it
+/// is really using the mirror, not skipping footer validation.
+#[test]
+fn a_damaged_trailing_footer_is_recovered_from_the_mirror_like_the_reference_tool() {
+    let vhd = vhd_path("mirror-fallback");
+    qemu_create(&vhd, "4M", None);
+    let len = std::fs::metadata(&vhd).unwrap().len();
+    let intact_size = qemu_vpc_virtual_size(&vhd);
+
+    let zero = |at: u64| {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new().write(true).open(&vhd).unwrap();
+        f.seek(SeekFrom::Start(at)).unwrap();
+        f.write_all(&[0u8; FOOTER_SIZE]).unwrap();
+    };
+
+    zero(len - FOOTER_SIZE as u64);
+    assert_eq!(
+        qemu_vpc_virtual_size(&vhd),
+        intact_size,
+        "the reference tool no longer recovers a damaged tail, so this test's premise is gone"
+    );
+    let r = VhdReader::open(&vhd).expect("the mirror at offset 0 is intact");
+    assert_eq!(r.virtual_size(), intact_size);
+    assert!(r.footer_recovered_from_mirror());
+    drop(r);
+
+    zero(0);
+    let refused = run_qemu(&["info", "-f", "vpc", vhd.to_str().unwrap()]);
+    assert!(
+        !refused.status.success(),
+        "the reference tool opened an image with no valid footer, so it is not a control"
+    );
+    assert!(
+        VhdReader::open(&vhd).is_err(),
+        "no valid footer anywhere must be refused"
+    );
+}
+
 /// Cross-write (content): build a fixed VHD with our writer, write a
 /// payload, then have qemu convert it to raw and confirm the bytes
 /// survived. The strongest single check that our footer + fixed layout

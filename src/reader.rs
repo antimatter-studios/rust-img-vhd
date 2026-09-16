@@ -26,7 +26,7 @@
 
 use crate::dynamic::{DynamicHeader, BAT_UNALLOCATED, DYN_HEADER_SIZE};
 use crate::error::{Error, Result};
-use crate::footer::{DiskType, Footer, FOOTER_SIZE};
+use crate::footer::{DiskType, Footer, FOOTER_COOKIE, FOOTER_SIZE};
 use crate::footer_build::build_fixed_footer;
 use fs_core::{BlockDevice, FileDevice};
 use std::fs::OpenOptions;
@@ -88,6 +88,9 @@ pub struct VhdReader {
     /// and at the file tail for dynamic/differencing). Used to rewrite
     /// the trailing footer after appending a new block.
     footer_bytes: [u8; FOOTER_SIZE],
+    /// Whether the trailing footer was unreadable and the footer came
+    /// from the mirror at offset 0 instead.
+    footer_from_mirror: bool,
 }
 
 impl VhdReader {
@@ -151,7 +154,41 @@ impl VhdReader {
         let mut footer_bytes = [0u8; FOOTER_SIZE];
         dev.read_at(dev_size - FOOTER_SIZE as u64, &mut footer_bytes)
             .map_err(fs_core_to_vhd_error)?;
-        let footer = Footer::parse(&footer_bytes)?;
+        // Whether the last sector still starts with the footer cookie:
+        // a footer damaged in place rather than truncated away, so that
+        // sector is known to be the footer's and never data.
+        let tail_has_cookie = footer_bytes.starts_with(FOOTER_COOKIE);
+        let (footer, footer_bytes, footer_from_mirror) = match Footer::parse(&footer_bytes) {
+            Ok(footer) => (footer, footer_bytes, false),
+            // A dynamic or differencing image keeps a copy of its footer
+            // at offset 0, and that copy is what survives a truncated
+            // copy or a failed write at the tail. Fall back to it only
+            // when the tail does not parse, and only when the copy
+            // describes a sparse image: a fixed image has no mirror, and
+            // its first sector is guest data. If the fallback fails too,
+            // report why the TAIL failed -- that is the footer the image
+            // was supposed to have.
+            Err(tail_err) => {
+                if dev_size < 2 * FOOTER_SIZE as u64 {
+                    return Err(tail_err);
+                }
+                let mut mirror_bytes = [0u8; FOOTER_SIZE];
+                if dev.read_at(0, &mut mirror_bytes).is_err() {
+                    return Err(tail_err);
+                }
+                match Footer::parse(&mirror_bytes) {
+                    Ok(mirror)
+                        if matches!(
+                            mirror.disk_type,
+                            DiskType::Dynamic | DiskType::Differencing
+                        ) =>
+                    {
+                        (mirror, mirror_bytes, true)
+                    }
+                    _ => return Err(tail_err),
+                }
+            }
+        };
 
         let virtual_size = footer.current_size;
 
@@ -286,8 +323,25 @@ impl VhdReader {
                 // This is the same number the allocator uses for the
                 // tail, computed once and shared rather than written
                 // twice with a footer between the two spellings.
+                //
+                // Unless the footer came from the mirror. Then the last
+                // sector is either a damaged footer or -- when the file
+                // was truncated by its footer -- the end of the last
+                // block. A tail that still carries the cookie is the
+                // footer's sector, so the bound stays. Otherwise the two
+                // cannot be told apart by the bytes, and the data area
+                // runs to `dev_size`: a writer never puts a block over its
+                // own footer, and damage in place does not move the BAT,
+                // so a block reaching `dev_size` means the file was cut
+                // there (or the image was already corrupt). The tail goes
+                // after whichever is further out, the last block or the
+                // damaged footer's sector.
                 let next_alloc = dev_size.saturating_sub(FOOTER_SIZE as u64);
-                let data_end = next_alloc;
+                let data_end = if footer_from_mirror && !tail_has_cookie {
+                    dev_size
+                } else {
+                    next_alloc
+                };
 
                 let mut allocated: Vec<u32> = Vec::new();
                 for &entry in &bat {
@@ -324,6 +378,12 @@ impl VhdReader {
                 }) {
                     return Err(Error::Corrupt("two BAT entries name overlapping blocks"));
                 }
+                let next_alloc = match allocated.last() {
+                    Some(&last) if footer_from_mirror => {
+                        next_alloc.max((last as u64) * SECTOR_SIZE + block_total)
+                    }
+                    _ => next_alloc,
+                };
 
                 // A differencing image's parent-locator payloads are
                 // metadata too, but they sit wherever the writer put them
@@ -417,7 +477,16 @@ impl VhdReader {
             virtual_size,
             next_alloc_off: Mutex::new(next_alloc_off),
             footer_bytes,
+            footer_from_mirror,
         })
+    }
+
+    /// Whether this image's trailing footer was damaged and it was opened
+    /// from the footer mirror at offset 0 instead. A caller can tell a
+    /// healthy image from a recovered one with this; the bytes served are
+    /// the same either way.
+    pub fn footer_recovered_from_mirror(&self) -> bool {
+        self.footer_from_mirror
     }
 
     /// Create a fresh fixed-VHD at `path` with the given virtual size,
