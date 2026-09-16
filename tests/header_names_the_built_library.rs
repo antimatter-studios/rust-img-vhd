@@ -39,8 +39,11 @@ fn lib_name(cargo_toml: &str) -> Option<String> {
     Some(doc.get("lib")?.get("name")?.as_str()?.to_owned())
 }
 
-/// Every `lib<something>.a` the header mentions. A scan, because a C
-/// header has no parser here — see the module note.
+/// Every `lib<something>.a` the header mentions, anywhere.
+///
+/// A scan, because a C header has no parser here — see the module
+/// note. It is deliberately context-free, which is why it is not the
+/// only thing asserted: see [`states_the_link_instruction`].
 fn libraries_named(header: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in header.lines() {
@@ -58,6 +61,78 @@ fn libraries_named(header: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether the header AFFIRMATIVELY tells a consumer to link `want`.
+///
+/// Ported from `rust-img-vhdx`, where the two defects narrated below
+/// were found and fixed (`rust-img-vhdx#76`, `#79`); this copy lacked
+/// the predicate entirely until `#70`.
+///
+/// `libraries_named` alone cannot say this. It matches any mention, so
+/// a header whose only sentence is "do not link with libfoo.a" — or
+/// which names the library in passing while giving no instruction at
+/// all — satisfies a check built on it. The point of the file is that
+/// a C consumer reading the header knows what to link, and "mentioned
+/// somewhere" is not that.
+///
+/// THE INSTRUCTION MUST OPEN THE SENTENCE. After comment decoration
+/// (`*`, `/`, `#`) and leading space, the line has to begin `link with
+/// <want>`.
+///
+/// The first version of this searched for the phrase ANYWHERE on the
+/// line, and so accepted `Do not link with <want>` — a header telling
+/// a consumer explicitly not to link the library passed a test whose
+/// purpose is to confirm it says to link it. The failure message below
+/// already claimed that case was caught; the predicate did not
+/// implement it, which is this file's own defect shape one level in.
+///
+/// It stays a rule about how the sentence STARTS rather than a
+/// negation blacklist, because a blacklist is a list of the negations
+/// someone thought of. Refusing `To use this, link with <want>` is the
+/// price, and it fails loudly with the line quoted.
+///
+/// # THE PHRASE IS CASE-INSENSITIVE; THE FILENAME IS NOT
+///
+/// This lowercased the whole LINE and compared it against a `want`
+/// that was not lowercased. `want` is `format!("lib{name}.a")` with
+/// `name` read verbatim from `[lib] name`, so a manifest declaring
+/// `Vhd` produced `libVhd.a`, the header's correct `Link with
+/// libVhd.a` was lowered to `libvhd.a`, and the guard REJECTED a
+/// header that was right. Because it runs first in the `staticlib`
+/// task, that stops packaging before the release build.
+///
+/// **Lowercasing `want` too would have been the wrong repair.** It
+/// makes the comparison case-insensitive on both sides, so a header
+/// saying `libvhd.a` while cargo builds `libVhd.a` would pass — and
+/// a linker is case-sensitive about a filename, so the consumer is
+/// then told to link a file that does not exist. It would trade a loud
+/// false rejection for a silent false acceptance, which is the worse
+/// direction and the one this file exists to close.
+///
+/// So only the PHRASE is matched without regard to case, and the
+/// library name is compared exactly. `want` is untouched: it also
+/// builds the `include/{name}.h` path and appears in the failure
+/// messages, and lowercasing it at the source would look for the wrong
+/// header on precisely the crates this concerns.
+fn states_the_link_instruction(header: &str, want: &str) -> bool {
+    /// Written lower-case; matched against the line without regard to
+    /// case.
+    const PHRASE: &str = "link with ";
+
+    header.lines().any(|line| {
+        let bare = line.trim_start().trim_start_matches(['*', '/', '#', ' ']);
+        // `get`, not `split_at`: a line whose tenth byte falls inside a
+        // multi-byte character would panic, and a header is free to
+        // contain one.
+        let Some(head) = bare.get(..PHRASE.len()) else {
+            return false;
+        };
+        if !head.eq_ignore_ascii_case(PHRASE) {
+            return false;
+        }
+        bare[PHRASE.len()..].trim_start().starts_with(want)
+    })
 }
 
 #[test]
@@ -87,6 +162,13 @@ fn the_header_tells_consumers_to_link_the_library_that_is_built() {
         !named.is_empty(),
         "include/{name}.h names no lib*.a at all, so it gives a C consumer no link \
          guidance. It should name {want}."
+    );
+
+    assert!(
+        states_the_link_instruction(&header, &want),
+        "include/{name}.h mentions {named:?} but never says \"Link with {want}\". A \
+         consumer reading it is not told what to link, and a mention in passing — or \
+         in a sentence saying NOT to link something — is not an instruction."
     );
 
     for got in &named {
@@ -142,6 +224,100 @@ fn the_lib_name_comes_from_the_lib_section_and_not_the_package() {
     );
     // And a manifest with no [lib] section has no library name to give.
     assert_eq!(lib_name("[package]\nname = \"am-img-vhd\"\n"), None);
+}
+
+/// AN INSTRUCTION, NOT A MENTION — AND NOT A NEGATION.
+///
+/// The rejection half is the filed defect: `Do not link with
+/// libvhd.a` satisfied a check for "does the header say to link it".
+///
+/// The acceptance half is the one that gets forgotten. A stricter
+/// matcher that closed the negation gap by refusing the real header —
+/// or the same sentence behind `//`, `#`, or a closing `*/` — would be
+/// a worse guard than the gap it removed, so both directions are
+/// asserted here rather than only the one the issue named.
+#[test]
+fn the_link_instruction_must_open_the_sentence() {
+    let want = "libvhd.a";
+
+    for accepted in [
+        " * Link with libvhd.a alongside fs_core.h.\n",
+        "Link with libvhd.a\n",
+        "// Link with libvhd.a and include this header.\n",
+        "  # link with   libvhd.a\n",
+        " */ Link with libvhd.a\n",
+        " * unrelated first line\n * Link with libvhd.a\n",
+    ] {
+        assert!(
+            states_the_link_instruction(accepted, want),
+            "{accepted:?} tells a consumer to link {want} and must be read as one"
+        );
+    }
+
+    for refused in [
+        // The filed defect.
+        " * Do not link with libvhd.a; it is an implementation detail.\n",
+        " * You must never link with libvhd.a directly.\n",
+        // A mention with no instruction: what rust-img-vhdx#76's first fix caught.
+        " * The build produces libvhd.a in the target directory.\n",
+        " * libvhd.a was renamed in 0.4.0.\n",
+        // An instruction naming a different library.
+        " * Link with libfs_core.a.\n",
+        // Nothing at all.
+        "",
+    ] {
+        assert!(
+            !states_the_link_instruction(refused, want),
+            "{refused:?} does not tell a consumer to link {want}"
+        );
+    }
+}
+
+/// A MIXED-CASE `[lib] name` IS A CORRECT MANIFEST, AND ITS HEADER
+/// MUST PASS.
+///
+/// The whole line was lowercased and `want` was not, so a crate
+/// declaring `[lib] name = "Vhd"` had its correct `Link with
+/// libVhd.a` rejected — in the packaging step, after a green CI.
+/// Unreachable in this repository, where the name is already
+/// lowercase, and unwitnessed too: no test above uses a name with an
+/// uppercase character in it, which is why the defect could sit here
+/// waiting to be copied into a crate where it bites.
+///
+/// The three assertions are three different claims and each fails on
+/// its own:
+///
+/// - the filed defect, which the old predicate got wrong;
+/// - the phrase is still read whatever its case, which is what the
+///   line-lowercasing was doing and had to be preserved;
+/// - the filename is NOT, which is the false acceptance that
+///   lowercasing `want` would have introduced.
+#[test]
+fn a_mixed_case_library_name_is_read_as_itself() {
+    assert!(
+        states_the_link_instruction(" * Link with libVhd.a alongside fs_core.h.\n", "libVhd.a"),
+        "a manifest may declare a mixed-case [lib] name, and a header naming that \
+         library exactly is telling a consumer the truth"
+    );
+
+    for spelling in [
+        " * LINK WITH libvhd.a\n",
+        " * Link With libvhd.a\n",
+        " * link with libvhd.a\n",
+    ] {
+        assert!(
+            states_the_link_instruction(spelling, "libvhd.a"),
+            "{spelling:?} is the instruction; only its case differs"
+        );
+    }
+
+    assert!(
+        !states_the_link_instruction(" * Link with libvhd.a\n", "libVhd.a"),
+        "cargo builds libVhd.a and the header says libvhd.a. A linker is \
+         case-sensitive about a filename, so this header sends a consumer after a \
+         file that is not there -- accepting it is the silent failure that \
+         lowercasing both sides would have introduced"
+    );
 }
 
 /// The header scan finds a library name wherever it sits in a line.
