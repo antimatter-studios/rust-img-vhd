@@ -27,7 +27,7 @@
 use crate::dynamic::{DynamicHeader, BAT_UNALLOCATED, DYN_HEADER_SIZE};
 use crate::error::{Error, Result};
 use crate::footer::{DiskType, Footer, FOOTER_COOKIE, FOOTER_SIZE};
-use crate::footer_build::{build_fixed_footer, size_with_exact_geometry};
+use crate::footer_build::{build_dynamic_footer, build_fixed_footer, size_with_exact_geometry};
 use fs_core::{BlockDevice, FileDevice};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -92,6 +92,11 @@ pub struct VhdReader {
     /// from the mirror at offset 0 instead.
     footer_from_mirror: bool,
 }
+
+/// The largest block table [`VhdReader::create_dynamic`] makes: 2^24
+/// entries, a 64 MiB table, which is the format's 2 TiB at 128 KiB
+/// blocks, or any smaller disk at a smaller block.
+const MAX_CREATE_BAT_ENTRIES: u32 = 1 << 24;
 
 impl VhdReader {
     /// Open `path` read-only and parse footer + (dynamic/differencing)
@@ -544,6 +549,83 @@ impl VhdReader {
         file.sync_data()?;
         // Drop our handle and re-open via the standard open path so the
         // returned reader walks the same code as any other fixed VHD.
+        drop(file);
+
+        Self::open_rw(path.as_ref())
+    }
+
+    /// Create a fresh, empty dynamic VHD at `path` with `block_size`-byte
+    /// blocks, and open it read-write.
+    ///
+    /// The layout is the one `qemu-img create -f vpc` writes: a copy of the
+    /// footer at 0, the dynamic header at 512, the BAT at 1536 with every
+    /// entry unallocated, and the footer after the BAT. Nothing past that
+    /// is allocated; `write_at` allocates blocks as it reaches them.
+    ///
+    /// `virtual_size_bytes` is rounded up as [`VhdReader::create_fixed`]
+    /// rounds it. `block_size` must be a power of two of at least 512
+    /// bytes; 2 MiB is the format's usual choice.
+    pub fn create_dynamic<P: AsRef<Path>>(
+        path: P,
+        virtual_size_bytes: u64,
+        block_size: u32,
+    ) -> Result<Self> {
+        if virtual_size_bytes == 0 || !virtual_size_bytes.is_multiple_of(SECTOR_SIZE) {
+            return Err(Error::Corrupt(
+                "create_dynamic: virtual_size must be a positive multiple of 512",
+            ));
+        }
+        if !block_size.is_power_of_two() || u64::from(block_size) < SECTOR_SIZE {
+            return Err(Error::Corrupt(
+                "create_dynamic: block_size must be a power of two of at least 512",
+            ));
+        }
+        let virtual_size_bytes = size_with_exact_geometry(virtual_size_bytes);
+        let entries = u32::try_from(virtual_size_bytes.div_ceil(u64::from(block_size)))
+            .map_err(|_| Error::Corrupt("create_dynamic: more blocks than a BAT can index"))?;
+        // THE BAT IS HELD WHOLE IN MEMORY by every reader of the image,
+        // this one included (`bat`), so its size is bounded here, before
+        // a file exists, rather than by an allocation failing at open. A
+        // 1 TiB disk in 512-byte blocks would be an 8 GiB table.
+        if entries > MAX_CREATE_BAT_ENTRIES {
+            return Err(Error::Corrupt(
+                "create_dynamic: the block table would exceed 64 MiB; use a larger block size",
+            ));
+        }
+
+        const HEADER_OFFSET: u64 = SECTOR_SIZE;
+        let table_offset = HEADER_OFFSET + DYN_HEADER_SIZE as u64;
+        let table_len = (u64::from(entries) * 4).div_ceil(SECTOR_SIZE) * SECTOR_SIZE;
+        let footer_at = table_offset + table_len;
+
+        let footer = build_dynamic_footer(virtual_size_bytes, HEADER_OFFSET);
+        let header = crate::dynamic::build_dynamic_header(table_offset, entries, block_size);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path.as_ref())?;
+        file.set_len(footer_at + FOOTER_SIZE as u64)?;
+        for (at, bytes) in [
+            (0, &footer[..]),
+            (HEADER_OFFSET, &header[..]),
+            (footer_at, &footer[..]),
+        ] {
+            file.seek(SeekFrom::Start(at))?;
+            file.write_all(bytes)?;
+        }
+        // Every entry unallocated, written a chunk at a time.
+        let chunk = vec![0xFFu8; (1 << 20).min(table_len as usize)];
+        file.seek(SeekFrom::Start(table_offset))?;
+        let mut left = table_len;
+        while left > 0 {
+            let n = left.min(chunk.len() as u64) as usize;
+            file.write_all(&chunk[..n])?;
+            left -= n as u64;
+        }
+        file.sync_data()?;
         drop(file);
 
         Self::open_rw(path.as_ref())
@@ -1495,6 +1577,25 @@ fn fs_core_to_vhd_error(e: fs_core::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
+    /// A block table past 64 MiB is refused before any file is made.
+    #[test]
+    fn create_dynamic_refuses_a_block_table_past_64_mib() {
+        let dir = std::env::temp_dir().join(format!("vhd-bat-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("too-big.vhd");
+        let over = (u64::from(MAX_CREATE_BAT_ENTRIES) + 1) * 4096;
+        match VhdReader::create_dynamic(&path, over, 4096) {
+            Err(Error::Corrupt(msg)) => assert!(msg.contains("64 MiB"), "{msg}"),
+            Err(other) => panic!("refused for the wrong reason: {other}"),
+            Ok(_) => panic!(
+                "a {}-entry block table was created",
+                MAX_CREATE_BAT_ENTRIES + 1
+            ),
+        }
+        assert!(!path.exists(), "a refused create left a file behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use crate::dynamic::DynamicHeader;
 
