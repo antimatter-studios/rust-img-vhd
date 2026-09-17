@@ -1,0 +1,66 @@
+# .github-guard — declarations github-guard reads (see the github-guard skill:
+# https://github.com/antimatter-studios/agent-skills/blob/main/.claude/skills/github-guard/README.md).
+# git-config format: check with `git config -f .github-guard --list`, and
+# double-quote any value containing # or ;.
+
+# Required status checks for main. A declaration beats discovery exactly.
+#
+# WHY THIS FILE EXISTS WHEN THE LIST IS ALREADY RIGHT.
+#
+# On 2026-09-17 branch protection required exactly these five names and
+# `ci.yml` produced exactly these five, all green — so this file changes
+# nothing today. It is written anyway, because the list it pins lived only
+# in the GitHub settings page: a text box with no reviewer, no history in
+# this repository, and no relationship to the workflow beside it. Nothing
+# there fails when the two drift apart. Add a matrix leg, rename a job, or
+# split `test` in two, and the new check reports on every pull request while
+# the gate keeps asking for the old set — green, and gating less than it did
+# the day before. That is the "fake coverage" audit of
+# antimatter-studios/diskjockey#197, sections 1 and 7, and the sibling
+# `rust-img-qcow2` is what it looks like when it has already happened: a
+# sixth check, `test / i686-unknown-linux-gnu`, produced on every pull
+# request and required by nothing.
+#
+# Discovery is not the answer either. github-guard's fallback requires
+# checks BY JOB NAME, which is a guess at the PR gate and drifts the same
+# way from the other side: a renamed job, an added workflow, or any future
+# check reporting under the github-actions app changes what is required
+# without anyone deciding to. Pinning it costs nothing and makes the intent
+# reviewable in a pull request, which is the whole point.
+#
+# WHAT EACH NAME IS AND WHY IT GATES.
+#
+# All five run on `pull_request` (`ci.yml` triggers on `push` to main and on
+# `pull_request` with no branch filter), so all five can gate one. Nothing
+# from `release.yml` is declared: it triggers on a `v*.*.*` tag, after the
+# merge it would have gated, and a required check that never reports on a
+# pull request blocks the repository permanently.
+#
+#   test / <os>      — the three matrix legs of the `test` job: build,
+#                      `cargo test --locked --all-targets`, clippy. The
+#                      spelling is GitHub's for a matrix job, `name` then
+#                      ` / ` then the matrix value, spaces around the slash
+#                      included; it is the check-run name reported on
+#                      2847b3a and it is what must be written here.
+#                      Declaring all three rather than ubuntu alone is
+#                      deliberate: this crate reads and writes a
+#                      byte-exact on-disk format, and the Windows leg
+#                      already executes one test fewer than the other two.
+#   qemu-validation  — cross-validates our reader and writer against
+#                      `qemu-img`. It is the only job that runs the
+#                      `qemu-validation` feature at all: the `test` legs
+#                      build `tests/qemu_validation.rs` with the feature
+#                      off, where it compiles to an empty shell and runs 0
+#                      tests. Drop this from the required list and the only
+#                      check that compares us to another implementation
+#                      stops being a gate.
+#   fmt              — `cargo fmt --check`.
+#
+# Names must match the check-run names GitHub reports, including the
+# "test / <os>" job-matrix spelling.
+[checks]
+	required = fmt
+	required = qemu-validation
+	required = test / ubuntu-latest
+	required = test / macos-latest
+	required = test / windows-latest

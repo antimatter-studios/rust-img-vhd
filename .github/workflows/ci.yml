@@ -57,7 +57,46 @@ jobs:
         # variable: tests/ci_profile.rs reads this file and fails if no
         # `cargo test` in it runs without `--release` while setting this.
         # See #59.
-        run: cargo test --locked --all-targets
+        #
+        # `shell: bash` because the floor below is a shell script and the
+        # default shell on the windows-latest leg is PowerShell, where
+        # `$(...)`, `[ ... ]` and `trap` do not mean what they mean here.
+        # The handshake stays in the `env:` mapping rather than moving
+        # inline now that bash runs on every leg: it is a fact about the
+        # run's environment, and one mapping states it once.
+        shell: bash
+        run: |
+          # A FLOOR, BECAUSE THE FAILURE MODE HERE IS AN ABSENCE.
+          # `cargo test` exits 0 on "0 passed; 0 failed", so a filter that
+          # selects nothing, a build that produced no test binaries, and a
+          # suite that compiled itself away all report exactly the green a
+          # full run reports. Nothing above reads the number, so only a
+          # count can tell them apart. See antimatter-studios/diskjockey#197.
+          #
+          # Measured on 2026-09-17 from run 35176485318 (main, 2847b3a):
+          # 215 tests executed on ubuntu-latest and macos-latest and 214 on
+          # windows-latest, over nine binaries. The floor is 200 -- below
+          # the smallest of those by enough that deleting a test is not a
+          # CI failure, and far above the empty run it exists to catch. It
+          # moves up with the suite and never down.
+          #
+          # THE OUTPUT GOES TO A FILE AND IS PRINTED BY THE TRAP RATHER
+          # THAN PIPED THROUGH `tee`. tests/ci_profile.rs refuses to count
+          # a `cargo test` whose exit status a pipe discards, and it is
+          # right to: Actions runs a `run:` block without `pipefail` by
+          # default, so a pipeline's status is `tee`'s and a red suite
+          # would leave this step green. Piping here would fail both
+          # workflow assertions in that file, which is the guard working.
+          # The trap prints the log on the way out either way -- including
+          # when the suite failed and `errexit` ended the step at that line.
+          trap 'cat "$RUNNER_TEMP/test.log"' EXIT
+          cargo test --locked --all-targets > "$RUNNER_TEMP/test.log" 2>&1
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test.log" | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 200)"
+          if [ "$n" -lt 200 ]; then
+              echo "::error::only $n tests executed, floor is 200 -- 214 to 215 ran on 2026-09-17 in run 35176485318, and a run that executes fewer than that stopped early rather than passed"
+              exit 1
+          fi
         env:
           EXPECT_OVERFLOW_CHECKS: "1"
       - name: clippy
@@ -92,7 +131,34 @@ jobs:
         with:
           workspaces: rust-img-vhd
       - name: qemu cross-validation tests
-        run: cargo test --locked --features qemu-validation --test qemu_validation
+        run: |
+          # A FLOOR, AND ITS OWN, BECAUSE THIS RUN SELECTS BY NAME.
+          # `--test qemu_validation` names one integration target, and
+          # `--features qemu-validation` is what makes the bodies in it
+          # compile to anything: the `test` legs build the same file with
+          # the feature off and run 0 tests out of it. So a renamed target,
+          # a renamed feature, or a `#[cfg(feature = ...)]` that stops
+          # matching leaves this job exiting 0 having cross-validated
+          # nothing, and the floor on the `test` legs cannot see it --
+          # their own count would not move by one.
+          #
+          # Measured on 2026-09-17 from run 35176485318 (main, 2847b3a):
+          # 12 tests executed. The floor is 10: small enough that removing
+          # a case is not a CI failure, and still an assertion that the
+          # suite ran rather than evaporated.
+          #
+          # Redirected and printed by the trap rather than piped through
+          # `tee`, for the same reason as the `test` job above: a pipe
+          # would hand this step `tee`'s exit status instead of the
+          # suite's, and Actions runs this block without `pipefail`.
+          trap 'cat "$RUNNER_TEMP/qemu-validation.log"' EXIT
+          cargo test --locked --features qemu-validation --test qemu_validation > "$RUNNER_TEMP/qemu-validation.log" 2>&1
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/qemu-validation.log" | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 10)"
+          if [ "$n" -lt 10 ]; then
+              echo "::error::only $n qemu cross-validation tests executed, floor is 10 -- 12 ran on 2026-09-17 in run 35176485318, and a run that executes fewer than that stopped early rather than passed"
+              exit 1
+          fi
 
   fmt:
     name: fmt
