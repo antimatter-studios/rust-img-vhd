@@ -24,18 +24,18 @@ fn write_refuses_an_input_past_the_virtual_disk_by_its_length() {
         String::from_utf8_lossy(&made.stderr)
     );
 
-    // Sparse: 64 GiB of length and no bytes on disk, so reading it whole
-    // is what would cost, not creating it.
+    // Twice the disk. Not sparse-sized: Windows allocates what set_len
+    // asks for, so this stays small enough to exist on any runner.
     std::fs::File::create(&input)
         .unwrap()
-        .set_len(64 << 30)
+        .set_len(32 << 20)
         .unwrap();
     let wrote = Command::new(tool)
         .args(["write", vhd.to_str().unwrap(), "0", input.to_str().unwrap()])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&wrote.stderr);
-    assert!(!wrote.status.success(), "a 64 GiB input was accepted");
+    assert!(!wrote.status.success(), "a 32 MiB input was accepted");
     assert!(
         stderr.contains("run past"),
         "refused, but not by its length: {stderr}"
