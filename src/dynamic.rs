@@ -130,6 +130,27 @@ impl DynamicHeader {
 
 /// One's complement of the u32 sum, with the checksum field (36..40)
 /// zeroed during compute. Same algorithm as the footer.
+/// Compose a 1024-byte dynamic disk header: BAT at `table_offset` with
+/// `max_table_entries` entries of `block_size` bytes each, no parent.
+pub fn build_dynamic_header(
+    table_offset: u64,
+    max_table_entries: u32,
+    block_size: u32,
+) -> [u8; DYN_HEADER_SIZE] {
+    let mut h = [0u8; DYN_HEADER_SIZE];
+    h[at::COOKIE].copy_from_slice(DYN_HEADER_COOKIE);
+    // Data offset is unused and all ones.
+    h[at::DATA_OFFSET..at::DATA_OFFSET + 8].copy_from_slice(&u64::MAX.to_be_bytes());
+    h[at::TABLE_OFFSET..at::TABLE_OFFSET + 8].copy_from_slice(&table_offset.to_be_bytes());
+    h[at::HEADER_VERSION..at::HEADER_VERSION + 4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    h[at::MAX_TABLE_ENTRIES..at::MAX_TABLE_ENTRIES + 4]
+        .copy_from_slice(&max_table_entries.to_be_bytes());
+    h[at::BLOCK_SIZE..at::BLOCK_SIZE + 4].copy_from_slice(&block_size.to_be_bytes());
+    let cs = compute_checksum(&h);
+    h[at::CHECKSUM].copy_from_slice(&cs.to_be_bytes());
+    h
+}
+
 pub fn compute_checksum(header_bytes: &[u8]) -> u32 {
     ones_complement_checksum(header_bytes, DYN_HEADER_SIZE, at::CHECKSUM)
 }

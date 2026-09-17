@@ -46,6 +46,24 @@ const CREATOR_HOST_OS: u32 = 0x4D61_6320; // "Mac "
 /// the byte sum with the checksum field zeroed (same routine as
 /// [`crate::footer::compute_checksum`]).
 pub fn build_fixed_footer(virtual_size_bytes: u64) -> [u8; FOOTER_SIZE] {
+    build_footer(virtual_size_bytes, disk_type_wire::FIXED, u64::MAX)
+}
+
+/// Compose a 512-byte footer for a dynamic VHD whose dynamic header sits
+/// at `dynamic_header_offset`. Identical to [`build_fixed_footer`] but for
+/// the disk type and the data offset, which a fixed disk leaves all ones.
+pub fn build_dynamic_footer(
+    virtual_size_bytes: u64,
+    dynamic_header_offset: u64,
+) -> [u8; FOOTER_SIZE] {
+    build_footer(
+        virtual_size_bytes,
+        disk_type_wire::DYNAMIC,
+        dynamic_header_offset,
+    )
+}
+
+fn build_footer(virtual_size_bytes: u64, disk_type: u32, data_offset: u64) -> [u8; FOOTER_SIZE] {
     let mut f = [0u8; FOOTER_SIZE];
 
     // Cookie.
@@ -54,8 +72,8 @@ pub fn build_fixed_footer(virtual_size_bytes: u64) -> [u8; FOOTER_SIZE] {
     write_u32(&mut f, at::FEATURES, 0x0000_0002);
     // File format version 1.0.
     write_u32(&mut f, at::FILE_FORMAT_VERSION, 0x0001_0000);
-    // Data offset: 0xFFFF... for fixed (no dynamic header).
-    write_u64(&mut f, at::DATA_OFFSET, u64::MAX);
+    // Data offset: the dynamic header, or 0xFFFF... for fixed (none).
+    write_u64(&mut f, at::DATA_OFFSET, data_offset);
     // Timestamp: seconds since VHD epoch (2000-01-01 UTC).
     write_u32(&mut f, at::TIMESTAMP, vhd_timestamp_now());
     // Creator app, version, host OS.
@@ -71,7 +89,7 @@ pub fn build_fixed_footer(virtual_size_bytes: u64) -> [u8; FOOTER_SIZE] {
     f[at::DISK_GEOMETRY + 2] = heads;
     f[at::DISK_GEOMETRY + 3] = spt;
     // Disk type.
-    write_u32(&mut f, at::DISK_TYPE, disk_type_wire::FIXED);
+    write_u32(&mut f, at::DISK_TYPE, disk_type);
     // Checksum is computed last with bytes 64..68 zeroed.
     // Unique ID (v4 UUID, 16 bytes).
     let uuid = generate_uuid_v4();

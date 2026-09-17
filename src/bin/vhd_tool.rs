@@ -4,6 +4,9 @@
 //!   vhd_tool info <file>
 //!   vhd_tool read <file> <offset> <len>     hex dump
 //!   vhd_tool create-fixed <file> <size>     fresh fixed VHD
+//!   vhd_tool create-dynamic <file> <size> [--block-size N]
+//!                                           fresh dynamic VHD (2 MiB blocks)
+//!   vhd_tool write <file> <offset> <input>  write <input>'s bytes at <offset>
 
 use std::process::ExitCode;
 use vhd::VhdReader;
@@ -14,13 +17,17 @@ fn main() -> ExitCode {
         Some("info") => cmd_info(&args[2..]),
         Some("read") => cmd_read(&args[2..]),
         Some("create-fixed") => cmd_create_fixed(&args[2..]),
+        Some("create-dynamic") => cmd_create_dynamic(&args[2..]),
+        Some("write") => cmd_write(&args[2..]),
         _ => {
             eprintln!(
                 "vhd_tool — VHD inspector\n\n\
                  Usage:\n\
                  \tvhd_tool info <file>\n\
                  \tvhd_tool read <file> <offset> <len>\n\
-                 \tvhd_tool create-fixed <file> <size>\n"
+                 \tvhd_tool create-fixed <file> <size>\n\
+                 \tvhd_tool create-dynamic <file> <size> [--block-size N]\n\
+                 \tvhd_tool write <file> <offset> <input>\n"
             );
             Ok(())
         }
@@ -79,6 +86,40 @@ fn cmd_create_fixed(args: &[String]) -> Result<(), String> {
         args[0],
         r.virtual_size()
     );
+    Ok(())
+}
+
+/// The default dynamic block size, the one Hyper-V and qemu-img use.
+const DEFAULT_BLOCK_SIZE: u64 = 2 * 1024 * 1024;
+
+fn cmd_create_dynamic(args: &[String]) -> Result<(), String> {
+    let (file, size, block_size) = match args {
+        [file, size] => (file, size, DEFAULT_BLOCK_SIZE),
+        [file, size, flag, n] if flag == "--block-size" => (file, size, parse_u64(n)?),
+        _ => return Err("create-dynamic: expected <file> <size> [--block-size N]".into()),
+    };
+    let size = parse_u64(size)?;
+    let block_size =
+        u32::try_from(block_size).map_err(|_| format!("block size {block_size} is too large"))?;
+    let r = VhdReader::create_dynamic(file, size, block_size).map_err(|e| e.to_string())?;
+    println!(
+        "created dynamic VHD: {file} ({} bytes virtual, {} byte blocks)",
+        r.virtual_size(),
+        r.block_size()
+    );
+    Ok(())
+}
+
+fn cmd_write(args: &[String]) -> Result<(), String> {
+    if args.len() != 3 {
+        return Err("write: expected <file> <offset> <input>".into());
+    }
+    let offset = parse_u64(&args[1])?;
+    let data = std::fs::read(&args[2]).map_err(|e| format!("reading {}: {e}", args[2]))?;
+    let r = VhdReader::open_rw(&args[0]).map_err(|e| e.to_string())?;
+    r.write_at(offset, &data).map_err(|e| e.to_string())?;
+    r.flush_writes().map_err(|e| e.to_string())?;
+    println!("wrote {} bytes at {offset}", data.len());
     Ok(())
 }
 
