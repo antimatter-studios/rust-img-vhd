@@ -27,7 +27,7 @@
 use crate::dynamic::{DynamicHeader, BAT_UNALLOCATED, DYN_HEADER_SIZE};
 use crate::error::{Error, Result};
 use crate::footer::{DiskType, Footer, FOOTER_COOKIE, FOOTER_SIZE};
-use crate::footer_build::{build_fixed_footer, size_with_exact_geometry};
+use crate::footer_build::{build_dynamic_footer, build_fixed_footer, size_with_exact_geometry};
 use fs_core::{BlockDevice, FileDevice};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -544,6 +544,67 @@ impl VhdReader {
         file.sync_data()?;
         // Drop our handle and re-open via the standard open path so the
         // returned reader walks the same code as any other fixed VHD.
+        drop(file);
+
+        Self::open_rw(path.as_ref())
+    }
+
+    /// Create a fresh, empty dynamic VHD at `path` with `block_size`-byte
+    /// blocks, and open it read-write.
+    ///
+    /// The layout is the one `qemu-img create -f vpc` writes: a copy of the
+    /// footer at 0, the dynamic header at 512, the BAT at 1536 with every
+    /// entry unallocated, and the footer after the BAT. Nothing past that
+    /// is allocated; `write_at` allocates blocks as it reaches them.
+    ///
+    /// `virtual_size_bytes` is rounded up as [`VhdReader::create_fixed`]
+    /// rounds it. `block_size` must be a power of two of at least 512
+    /// bytes; 2 MiB is the format's usual choice.
+    pub fn create_dynamic<P: AsRef<Path>>(
+        path: P,
+        virtual_size_bytes: u64,
+        block_size: u32,
+    ) -> Result<Self> {
+        if virtual_size_bytes == 0 || !virtual_size_bytes.is_multiple_of(SECTOR_SIZE) {
+            return Err(Error::Corrupt(
+                "create_dynamic: virtual_size must be a positive multiple of 512",
+            ));
+        }
+        if !block_size.is_power_of_two() || u64::from(block_size) < SECTOR_SIZE {
+            return Err(Error::Corrupt(
+                "create_dynamic: block_size must be a power of two of at least 512",
+            ));
+        }
+        let virtual_size_bytes = size_with_exact_geometry(virtual_size_bytes);
+        let entries = u32::try_from(virtual_size_bytes.div_ceil(u64::from(block_size)))
+            .map_err(|_| Error::Corrupt("create_dynamic: more blocks than a BAT can index"))?;
+
+        const HEADER_OFFSET: u64 = SECTOR_SIZE;
+        let table_offset = HEADER_OFFSET + DYN_HEADER_SIZE as u64;
+        let table_len = (u64::from(entries) * 4).div_ceil(SECTOR_SIZE) * SECTOR_SIZE;
+        let footer_at = table_offset + table_len;
+
+        let footer = build_dynamic_footer(virtual_size_bytes, HEADER_OFFSET);
+        let header = crate::dynamic::build_dynamic_header(table_offset, entries, block_size);
+        let bat = vec![0xFFu8; table_len as usize];
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path.as_ref())?;
+        file.set_len(footer_at + FOOTER_SIZE as u64)?;
+        for (at, bytes) in [
+            (0, &footer[..]),
+            (HEADER_OFFSET, &header[..]),
+            (table_offset, &bat[..]),
+            (footer_at, &footer[..]),
+        ] {
+            file.seek(SeekFrom::Start(at))?;
+            file.write_all(bytes)?;
+        }
+        file.sync_data()?;
         drop(file);
 
         Self::open_rw(path.as_ref())

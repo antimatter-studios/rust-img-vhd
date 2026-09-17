@@ -7,6 +7,15 @@ never does.
 
 ## [Unreleased]
 
+### Added
+
+- **`VhdReader::create_dynamic`, and `vhd_tool create-dynamic` and `write`.**
+  The only image the crate could make was an empty fixed one, so the
+  dynamic write path -- BAT allocation, bitmaps, the moving footer -- had
+  been read back by nothing but this crate. `create_dynamic` lays out what
+  `qemu-img create -f vpc` does, and the qemu cross-validation now reads a
+  dynamic image made and written through `vhd_tool` byte for byte (#46).
+
 ### Changed
 
 - **`Error::ReadOnly` carries its cause** (breaking: match `ReadOnly(_)`).

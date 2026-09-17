@@ -325,6 +325,85 @@ fn qemu_extracts_bytes_from_vhd_we_created() {
     );
 }
 
+/// Cross-write (dynamic): a dynamic VHD this crate created and wrote reads
+/// back through the reference tool byte for byte (#46).
+///
+/// Every image of ours qemu-img had read was fixed, so the dynamic write
+/// path -- BAT allocation, the sector bitmap, the footer mirror moving
+/// past each new block -- had only ever been read by this crate. Writes
+/// land in the first block, straddle a block boundary and hit a late
+/// block, so blocks are allocated out of order, and the image is made and
+/// written through `vhd_tool`, the surface the issue found missing.
+#[test]
+fn qemu_reads_a_dynamic_vhd_we_created_and_wrote() {
+    let vhd = vhd_path("dynamic-we-made");
+    let raw = raw_path("dynamic-we-made");
+    let tool = env!("CARGO_BIN_EXE_vhd_tool");
+    let block = 1u64 << 20;
+
+    let made = Command::new(tool)
+        .args([
+            "create-dynamic",
+            vhd.to_str().unwrap(),
+            "16777216",
+            "--block-size",
+        ])
+        .arg(block.to_string())
+        .output()
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+
+    let writes: [(u64, usize, u8); 3] = [
+        (12 * block + 17, 3000, 0xC3),
+        (block - 1000, 5000, 0xA5),
+        (4096, 700, 0x5A),
+    ];
+    for (i, (offset, len, fill)) in writes.iter().enumerate() {
+        let input = tmp("bin", &format!("dynamic-input-{i}"));
+        let bytes: Vec<u8> = (0..*len).map(|j| fill.wrapping_add(j as u8)).collect();
+        std::fs::write(&input, &bytes).unwrap();
+        let wrote = Command::new(tool)
+            .args(["write", vhd.to_str().unwrap(), &offset.to_string()])
+            .arg(input.as_os_str())
+            .output()
+            .unwrap();
+        assert!(
+            wrote.status.success(),
+            "{}",
+            String::from_utf8_lossy(&wrote.stderr)
+        );
+    }
+
+    let r = VhdReader::open(&vhd).unwrap();
+    assert_eq!(r.disk_type(), DiskType::Dynamic);
+    assert_eq!(r.virtual_size(), qemu_vpc_virtual_size(&vhd));
+    let size = r.virtual_size() as usize;
+    drop(r);
+
+    qemu_convert_vpc_to_raw(&vhd, &raw);
+    let theirs = std::fs::read(&raw).unwrap();
+    let mut expected = vec![0u8; size];
+    for (offset, len, fill) in writes {
+        for j in 0..len {
+            expected[offset as usize + j] = fill.wrapping_add(j as u8);
+        }
+    }
+    assert_eq!(
+        theirs.len(),
+        expected.len(),
+        "qemu-img's raw is a different size"
+    );
+    let first_difference = theirs.iter().zip(&expected).position(|(a, b)| a != b);
+    assert_eq!(
+        first_difference, None,
+        "qemu-img read a different byte from our dynamic image"
+    );
+}
+
 /// The reference tool's reading of `path` as if a CHS-deriving producer
 /// had written it: a copy with `creator_application` set to `"vpc "`
 /// (and the checksum recomputed), for which qemu-img takes the disk size
