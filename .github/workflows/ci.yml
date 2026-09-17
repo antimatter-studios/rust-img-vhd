@@ -92,9 +92,9 @@ jobs:
           trap 'cat "$RUNNER_TEMP/test.log"' EXIT
           cargo test --locked --all-targets > "$RUNNER_TEMP/test.log" 2>&1
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test.log" | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 200)"
-          if [ "$n" -lt 200 ]; then
-              echo "::error::only $n tests executed, floor is 200 -- 214 to 215 ran on 2026-09-17 in run 35176485318, and a run that executes fewer than that stopped early rather than passed"
+          echo "tests executed: $n (floor 99999)"
+          if [ "$n" -lt 99999 ]; then
+              echo "::error::only $n tests executed, floor is 99999 -- 214 to 215 ran on 2026-09-17 in run 35176485318, and a run that executes fewer than that stopped early rather than passed"
               exit 1
           fi
         env:
