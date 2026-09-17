@@ -64,3 +64,42 @@ fn write_refuses_an_input_past_the_virtual_disk_by_its_length() {
     drop(r);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An image given as its own input is refused, and left as it was.
+#[test]
+fn write_refuses_the_image_as_its_own_input() {
+    let dir = std::env::temp_dir().join(format!("vhd-tool-self-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let vhd = dir.join("self.vhd");
+    let tool = env!("CARGO_BIN_EXE_vhd_tool");
+    let made = Command::new(tool)
+        .args(["create-dynamic", vhd.to_str().unwrap(), "67108864"])
+        .output()
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let before = std::fs::read(&vhd).unwrap();
+
+    // Through a different spelling of the same path, too.
+    let spelled = dir.join(".").join("self.vhd");
+    let wrote = Command::new(tool)
+        .args([
+            "write",
+            vhd.to_str().unwrap(),
+            "0",
+            spelled.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&wrote.stderr);
+    assert!(!wrote.status.success(), "an image was written into itself");
+    assert!(stderr.contains("is the image being written"), "{stderr}");
+    assert!(
+        std::fs::read(&vhd).unwrap() == before,
+        "the refused write changed the image"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

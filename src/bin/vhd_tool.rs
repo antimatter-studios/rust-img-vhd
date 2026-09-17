@@ -116,8 +116,18 @@ fn cmd_write(args: &[String]) -> Result<(), String> {
     }
     use std::io::Read;
     let offset = parse_u64(&args[1])?;
-    let mut input =
-        std::fs::File::open(&args[2]).map_err(|e| format!("opening {}: {e}", args[2]))?;
+    // An image written into itself grows as it is read: each write can
+    // append to the file the next read comes from, so the copy chases its
+    // own tail and overwrites the image with its own new blocks.
+    if let (Ok(image), Ok(source)) = (
+        std::fs::canonicalize(&args[0]),
+        std::fs::canonicalize(&args[2]),
+    ) {
+        if image == source {
+            return Err(format!("write: {} is the image being written", args[2]));
+        }
+    }
+    let input = std::fs::File::open(&args[2]).map_err(|e| format!("opening {}: {e}", args[2]))?;
     let len = input
         .metadata()
         .map_err(|e| format!("reading {}: {e}", args[2]))?
@@ -135,6 +145,9 @@ fn cmd_write(args: &[String]) -> Result<(), String> {
             r.virtual_size()
         ));
     }
+    // No further than the length just checked, whatever the file does
+    // while it is read.
+    let mut input = input.take(len);
     let mut chunk = vec![0u8; 1 << 20];
     let mut at = offset;
     loop {
