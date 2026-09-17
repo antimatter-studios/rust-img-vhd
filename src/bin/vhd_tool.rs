@@ -114,12 +114,41 @@ fn cmd_write(args: &[String]) -> Result<(), String> {
     if args.len() != 3 {
         return Err("write: expected <file> <offset> <input>".into());
     }
+    use std::io::Read;
     let offset = parse_u64(&args[1])?;
-    let data = std::fs::read(&args[2]).map_err(|e| format!("reading {}: {e}", args[2]))?;
+    let mut input =
+        std::fs::File::open(&args[2]).map_err(|e| format!("opening {}: {e}", args[2]))?;
+    let len = input
+        .metadata()
+        .map_err(|e| format!("reading {}: {e}", args[2]))?
+        .len();
     let r = VhdReader::open_rw(&args[0]).map_err(|e| e.to_string())?;
-    r.write_at(offset, &data).map_err(|e| e.to_string())?;
+    // Checked before a byte is read: the input is streamed in chunks,
+    // so an oversized one -- a VHD picked as its own input, say -- is
+    // refused by its length rather than read into memory first.
+    if offset
+        .checked_add(len)
+        .is_none_or(|end| end > r.virtual_size())
+    {
+        return Err(format!(
+            "write: {len} bytes at {offset} run past the {}-byte virtual disk",
+            r.virtual_size()
+        ));
+    }
+    let mut chunk = vec![0u8; 1 << 20];
+    let mut at = offset;
+    loop {
+        let n = input
+            .read(&mut chunk)
+            .map_err(|e| format!("reading {}: {e}", args[2]))?;
+        if n == 0 {
+            break;
+        }
+        r.write_at(at, &chunk[..n]).map_err(|e| e.to_string())?;
+        at += n as u64;
+    }
     r.flush_writes().map_err(|e| e.to_string())?;
-    println!("wrote {} bytes at {offset}", data.len());
+    println!("wrote {} bytes at {offset}", at - offset);
     Ok(())
 }
 
