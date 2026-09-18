@@ -7,11 +7,11 @@
 #
 # WHY THIS FILE EXISTS WHEN THE LIST IS ALREADY RIGHT.
 #
-# On 2026-09-17 branch protection required exactly these five names and
-# `ci.yml` produced exactly these five, all green — so this file changes
-# nothing today. It is written anyway, because the list it pins lived only
-# in the GitHub settings page: a text box with no reviewer, no history in
-# this repository, and no relationship to the workflow beside it. Nothing
+# On 2026-09-17 branch protection required exactly five names and `ci.yml`
+# produced exactly those five, all green — so this file changed nothing the
+# day it was written. It was written anyway, because the list it pins lived
+# only in the GitHub settings page: a text box with no reviewer, no history
+# in this repository, and no relationship to the workflow beside it. Nothing
 # there fails when the two drift apart. Add a matrix leg, rename a job, or
 # split `test` in two, and the new check reports on every pull request while
 # the gate keeps asking for the old set — green, and gating less than it did
@@ -30,8 +30,8 @@
 #
 # WHAT EACH NAME IS AND WHY IT GATES.
 #
-# All five run on `pull_request` (`ci.yml` triggers on `push` to main and on
-# `pull_request` with no branch filter), so all five can gate one. Nothing
+# All six run on `pull_request` (`ci.yml` triggers on `push` to main and on
+# `pull_request` with no branch filter), so all six can gate one. Nothing
 # from `release.yml` is declared: it triggers on a `v*.*.*` tag, after the
 # merge it would have gated, and a required check that never reports on a
 # pull request blocks the repository permanently.
@@ -54,13 +54,44 @@
 #                      tests. Drop this from the required list and the only
 #                      check that compares us to another implementation
 #                      stops being a gate.
+#   test (release)   — `cargo test --locked --release --all-targets` on
+#                      ubuntu-latest, added with the job in #85. Literal
+#                      parentheses and no slash: the job key is
+#                      `test-release` and its `name:` is `test (release)`,
+#                      so that string is the whole check-run name. It is
+#                      NOT a matrix job, so none of the ` / <os>` spelling
+#                      above applies to it, and writing it as
+#                      `test / release` would declare a name nothing ever
+#                      reports — which github-guard would then require
+#                      forever, and no pull request could satisfy.
+#                      It gates because it is the only run in this
+#                      repository that compiles `[profile.release]` — the
+#                      profile that is published. Every other name here
+#                      that builds anything builds it in debug, where
+#                      arithmetic panics instead of wrapping and
+#                      `debug_assert!` bodies are live; a
+#                      defect visible only under `lto = true` and
+#                      `codegen-units = 1` has no other check that can see
+#                      it before the crate is on crates.io. Drop it from
+#                      this list and the shipped profile goes back to
+#                      being tested by nothing that gates.
 #   fmt              — `cargo fmt --check`.
 #
-# Names must match the check-run names GitHub reports, including the
-# "test / <os>" job-matrix spelling.
+# ON THE ORDER IN WHICH THIS ONE BECOMES A GATE. github-guard only makes a
+# declared name required once it has been green on main, so `test
+# (release)` was declared here in the same pull request that added the job
+# and became an enforced context on the next build of main, not on that
+# pull request itself. That is the intended sequence and not a gap: the
+# declaration is the reviewable decision, and the green run is the proof
+# the name is real.
+#
+# Names must match the check-run names GitHub reports exactly — including
+# the "test / <os>" job-matrix spelling, and "test (release)" with literal
+# parentheses and no slash.
 [checks]
 	required = fmt
 	required = qemu-validation
+	required = test (release)
 	required = test / ubuntu-latest
 	required = test / macos-latest
 	required = test / windows-latest
