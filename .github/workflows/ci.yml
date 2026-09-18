@@ -210,9 +210,9 @@ jobs:
           trap 'cat "$RUNNER_TEMP/test-release.log"' EXIT
           cargo test --locked --release --all-targets > "$RUNNER_TEMP/test-release.log" 2>&1
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test-release.log" | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 200)"
-          if [ "$n" -lt 200 ]; then
-              echo "::error::only $n release-profile tests executed, floor is 200 -- 215 ran on 2026-09-18 in run 35176485318, and a run that executes fewer than that stopped early rather than passed"
+          echo "tests executed: $n (floor 99999)"
+          if [ "$n" -lt 99999 ]; then
+              echo "::error::only $n release-profile tests executed, floor is 99999 -- 215 ran on 2026-09-18 in run 35176485318, and a run that executes fewer than that stopped early rather than passed"
               exit 1
           fi
 
