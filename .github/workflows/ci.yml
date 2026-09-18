@@ -102,6 +102,120 @@ jobs:
       - name: clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+  # THE PROFILE THAT SHIPS IS NOT THE PROFILE ANYTHING ABOVE TESTS.
+  #
+  # Every `cargo test` in this repository ran in the debug profile until
+  # #85: the three matrix legs above, the `qemu-validation` job below,
+  # and both suites in `release.yml`. What is published is built with
+  # `[profile.release]` -- `lto = true`, `codegen-units = 1`,
+  # `opt-level = 3`, `panic = "unwind"` -- and no run in the repository
+  # ever compiled it. A defect that only appears under optimisation had
+  # no job in which it could be seen before the crate went to crates.io.
+  #
+  # This is not a second copy of the matrix. The two profiles disagree
+  # about behaviour in three ways, and all three hide defects rather
+  # than invent them:
+  #
+  #   ARITHMETIC WRAPS INSTEAD OF PANICKING. `overflow-checks` is on in
+  #   debug and off in release, which is the whole subject of the step
+  #   above and of tests/ci_profile.rs. The consequence for THIS job is
+  #   the mirror image: a test that guards a computation against
+  #   overflow passes the debug run because the panic fires, and the
+  #   wrapped -- wrong -- value it was guarding against is still what
+  #   the shipped library computes. `rust-fs-ntfs` recorded exactly
+  #   that: `signed_bytes_needed` negated `i64::MIN`, panicked in debug,
+  #   wrapped in release, and the wrap happened to land on the right
+  #   answer, so four tests ran in CI against a build in which they
+  #   could not fail. Only a release run asks the question.
+  #
+  #   `debug_assert!` BODIES VANISH. Every invariant asserted that way
+  #   is enforced on the runs above and unchecked in the artefact. A
+  #   release run does not re-check those invariants -- nothing can, the
+  #   code is gone -- but it does exercise the paths downstream of them
+  #   with the assertions absent, which is the configuration a consumer
+  #   links against and the one nothing here had ever executed.
+  #
+  #   `lto = true` AND `codegen-units = 1` CHANGE INLINING, and this
+  #   crate is `crate-type = ["staticlib", "rlib"]` with a `#[unsafe(
+  #   no_mangle)] extern "C"` surface in src/capi.rs. `panic = "unwind"`
+  #   is load-bearing there: the C ABI entry points are where an unwind
+  #   must not cross, and cross-crate inlining under LTO is what moves
+  #   the code that can panic relative to the boundary that catches it.
+  #   The debug profile links none of that the same way.
+  #
+  # ONE RUNNER RATHER THAN THE MATRIX. Profile behaviour is a property
+  # of the optimiser, not of the operating system, so three of these
+  # would buy the same evidence three times and pay for it on every
+  # pull request. The platform question is the matrix's, and it keeps
+  # it.
+  #
+  # NO `EXPECT_OVERFLOW_CHECKS` HERE, DELIBERATELY. Overflow checks are
+  # meant to be off in this profile -- that is the thing being tested --
+  # and `overflow_checks::the_build_the_gate_asked_to_check_does_check`
+  # in src/lib.rs would fail the moment a release run claimed to be the
+  # checking one. The handshake belongs to the debug step above and to
+  # nothing else. See #85 and the comment on that step.
+  test-release:
+    name: test (release)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-img-vhd
+    steps:
+      - name: checkout am-img-vhd
+        uses: actions/checkout@v4
+        with:
+          path: rust-img-vhd
+      - name: checkout am-fs-core (sibling path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          ref: v0.2.10
+          path: rust-fs-core
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-img-vhd
+      - name: test --release
+        run: |
+          # ITS OWN FLOOR, NOT THE MATRIX'S, BECAUSE THIS IS A SEPARATE
+          # RUN SELECTION. It builds the same targets today and counts
+          # roughly the same number, but it is a different `cargo test`
+          # in a different profile, and the ways it can empty out are
+          # its own: a release-only build failure, a
+          # `#[cfg(debug_assertions)]` that takes a module out of this
+          # build alone, or a future narrowing of this command. Any of
+          # those leaves the matrix above untouched and fully green, so
+          # a floor shared with it would be satisfied by the other job
+          # while proving nothing at all about this one. See the floor
+          # in the `test` job for why a green `cargo test` is not
+          # evidence on its own -- it exits 0 on "0 passed; 0 failed",
+          # which is antimatter-studios/diskjockey#197.
+          #
+          # Measured on 2026-09-18 from run 35176485318 (main, 2847b3a): 215 tests executed. The floor is
+          # 200 -- roughly a tenth below, so deleting a test is
+          # not a CI failure, and far above the empty run it exists to
+          # catch. It moves up with the suite and never down.
+          #
+          # THE OUTPUT GOES TO A FILE AND IS PRINTED BY THE TRAP RATHER
+          # THAN PIPED THROUGH `tee`, for the reason spelled out on the
+          # `test` job: Actions runs a `run:` block without `pipefail`,
+          # so a pipeline hands this step `tee`'s exit status and a red
+          # suite would report green. tests/ci_profile.rs refuses to
+          # count a `cargo test` whose status a pipe discards, and the
+          # trap prints the log on the way out either way -- including
+          # when errexit ended the step at the `cargo test` line.
+          trap 'cat "$RUNNER_TEMP/test-release.log"' EXIT
+          cargo test --locked --release --all-targets > "$RUNNER_TEMP/test-release.log" 2>&1
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test-release.log" | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 200)"
+          if [ "$n" -lt 200 ]; then
+              echo "::error::only $n release-profile tests executed, floor is 200 -- 215 ran on 2026-09-18 in run 35176485318, and a run that executes fewer than that stopped early rather than passed"
+              exit 1
+          fi
+
   # Cross-validates our reader/writer against `qemu-img`. qemu-img is
   # invoked as a subprocess only — never linked, never bundled. The
   # qemu-utils package is installed only on the CI runner.
