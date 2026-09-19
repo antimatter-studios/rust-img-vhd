@@ -53,6 +53,7 @@
 //! declaration to lose.
 
 use saphyr::{LoadableYamlNode, Yaml};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 fn manifest_dir() -> PathBuf {
@@ -818,6 +819,60 @@ fn scan_shell(line: &str) -> ShellScan {
     }
 }
 
+/// The command `scripts/tier.sh` was asked to run, or `words` unchanged.
+///
+/// # WHY A WRAPPER IS RECOGNISED HERE AND NOWHERE ELSE
+///
+/// Every test run in `ci.yml` now goes through `scripts/tier.sh`, which
+/// runs it quietly under an output budget:
+///
+/// ```text
+/// bash scripts/tier.sh "test (debug)" debug 360 24000 -- cargo test --locked --all-targets
+/// ```
+///
+/// That is still a `cargo test`, and every assertion in this file has
+/// to read it as one -- the profile it builds, the handshake that arms
+/// the overflow probe, the target the cross-validation job selects.
+/// Left unrecognised, `cargo_test_arguments` returns `None` for all of
+/// them and the guards go quiet: they would find NO debug run in the
+/// workflow and fail loudly, which is the safe direction but the wrong
+/// answer.
+///
+/// THE OPPOSITE DIRECTION IS THE DANGEROUS ONE, so this is deliberately
+/// narrow. Only a word that IS the tier script counts -- `tier.sh`
+/// under a `scripts/` directory -- and only what follows the first `--`
+/// after it is returned, which is exactly what `tier.sh` execs. A
+/// wrapper this file does not know is still unrecognised, and its
+/// `cargo test` still does not count.
+///
+/// A tier invocation with no `--` runs nothing at all (`tier.sh` exits
+/// 2 on it), so the empty slice is the honest answer and yields `None`
+/// from every caller.
+fn without_the_tier_wrapper(words: &[String]) -> &[String] {
+    let is_the_tier_script = |w: &String| {
+        matches!(
+            w.rsplit('/').next(),
+            Some("tier.sh") if w.contains('/') && w.split('/').any(|part| part == "scripts")
+        )
+    };
+    let Some(at) = words.iter().position(is_the_tier_script) else {
+        return words;
+    };
+    // Anything in front of it must be an interpreter or an environment
+    // assignment; `sudo scripts/tier.sh` or `echo scripts/tier.sh` is
+    // not a tier invocation and is not unwrapped.
+    let leading_is_harmless = words[..at].iter().all(|w| {
+        w == "env" || w == "bash" || w == "sh" || (!w.starts_with('-') && w.contains('='))
+    });
+    if !leading_is_harmless {
+        return words;
+    }
+    match words[at..].iter().position(|w| w == "--") {
+        Some(separator) => &words[at + separator + 1..],
+        None => &words[words.len()..],
+    }
+}
+
 /// The arguments of a `cargo test` invocation on this line, or `None`
 /// if the line does not invoke one.
 ///
@@ -838,7 +893,11 @@ fn scan_shell(line: &str) -> ShellScan {
 /// between `cargo` and its subcommand. A wrapper -- `sudo`, `xargs`, a
 /// script -- is not recognised and the command does not count, which is
 /// the strict direction.
+///
+/// `scripts/tier.sh` IS THE ONE EXCEPTION, and it is named rather than
+/// inferred: see [`without_the_tier_wrapper`].
 fn cargo_test_arguments(words: &[String]) -> Option<Vec<&str>> {
+    let words = without_the_tier_wrapper(words);
     let mut words = words
         .iter()
         .map(String::as_str)
@@ -1569,6 +1628,13 @@ struct Step {
 #[derive(Debug)]
 struct Job {
     keys: Vec<String>,
+    /// The `name:` is taken VERBATIM, falling back to the job's KEY when
+    /// there is none -- which is what Actions reports in that case.
+    /// `test / ${{ matrix.os }}` is stored with its expression
+    /// unexpanded, because nothing here can expand it: the matrix is
+    /// Actions' to evaluate. Guards over this field therefore belong on
+    /// jobs whose name is a literal, which `qemu-validation` is.
+    name: String,
     steps: Vec<Step>,
 }
 
@@ -1666,7 +1732,7 @@ fn parse_workflow(text: &str) -> Workflow {
 
     let mut jobs = Vec::new();
     if let Some(mapping) = field(document, "jobs").and_then(Yaml::as_mapping) {
-        for (_, body) in mapping.iter() {
+        for (key, body) in mapping.iter() {
             let steps = field(body, "steps")
                 .and_then(Yaml::as_sequence)
                 .into_iter()
@@ -1697,6 +1763,9 @@ fn parse_workflow(text: &str) -> Workflow {
                 .collect();
             jobs.push(Job {
                 keys: keys_of(body),
+                name: field(body, "name")
+                    .and_then(scalar_text)
+                    .unwrap_or_else(|| key.as_str().unwrap_or_default().to_string()),
                 steps,
             });
         }
@@ -4646,6 +4715,935 @@ jobs:
             gating_runs_that_prove_the_build_traps(&yaml).len(),
             1,
             "`env:` says nothing about whether the step's result is read"
+        );
+    }
+}
+
+/// The names this repository's cross-validation job is made of.
+///
+/// Four literals, because four separate things have to keep agreeing
+/// and each can be changed on its own: the job's rendered `name:` (what
+/// GitHub reports and what `.github-guard` declares as required), the
+/// package that puts `qemu-img` on `PATH`, the integration target the
+/// job selects by name, and the cargo feature without which that target
+/// is not built at all.
+const QEMU_JOB: &str = "qemu-validation";
+const QEMU_PACKAGE: &str = "qemu-utils";
+const QEMU_TARGET: &str = "qemu_validation";
+const QEMU_FEATURE: &str = "qemu-validation";
+
+/// The gating job of `workflow` whose check-run name is `name`.
+///
+/// Gating in the same sense [`collect_steps`] means it -- the workflow
+/// still triggers on a pull request, and neither the job nor the step
+/// carries a key from [`NON_GATING_KEYS`] -- because a job that cannot
+/// turn a pull request red is not a gate whatever it is called. The
+/// steps handed back are only the gating ones, so an `if:` on the
+/// install step hides it from the assertions below rather than
+/// satisfying them.
+fn gating_job_named(workflow: &str, name: &str) -> Option<Job> {
+    let wf = parse_workflow(workflow);
+    if !runs_on_pull_request(&wf) {
+        return None;
+    }
+    let carries_a_non_gating_key =
+        |keys: &[String]| keys.iter().any(|k| NON_GATING_KEYS.contains(&k.as_str()));
+    let mut job = wf
+        .jobs
+        .into_iter()
+        .find(|job| job.name == name && !carries_a_non_gating_key(&job.keys))?;
+    job.steps
+        .retain(|step| !carries_a_non_gating_key(&step.keys));
+    Some(job)
+}
+
+/// Every command a job's gating steps actually run, tokenised.
+///
+/// Through [`command_lines`] and [`shell_commands`], which is the same
+/// grammar the overflow guards above read the workflow with. Reading
+/// `step.run` raw would count a command named in a `#` line -- the
+/// recurring defect this file records in three other places.
+fn job_commands(job: &Job) -> Vec<Vec<String>> {
+    job.steps
+        .iter()
+        .flat_map(|step| command_lines(&step.run))
+        .flat_map(|line| shell_commands(&line))
+        .map(|(words, _)| words)
+        .collect()
+}
+
+/// Whether one tokenised command installs `package` with a system
+/// package manager.
+///
+/// `sudo`, an `env` prefix and leading `NAME=value` assignments are
+/// stepped over; anything else in front of the manager means the
+/// command is not recognised and does not count. An UNRECOGNISED
+/// installer therefore fails the guard rather than passing it, which is
+/// the direction that has to be wrong: someone who changes how
+/// `qemu-img` gets onto the runner changes this list in the same
+/// commit, and someone who deletes the install step gets a red suite
+/// instead of a job that installs nothing and cross-validates against
+/// whatever the image happened to ship.
+fn installs_package(words: &[String], package: &str) -> bool {
+    let mut words = words
+        .iter()
+        .map(String::as_str)
+        .skip_while(|w| *w == "sudo" || *w == "env" || (!w.starts_with('-') && w.contains('=')));
+    let Some(program) = words.next() else {
+        return false;
+    };
+    let program = program.rsplit('/').next().unwrap_or(program);
+    if !matches!(program, "apt-get" | "apt" | "brew" | "dnf" | "yum" | "apk") {
+        return false;
+    }
+    let rest: Vec<&str> = words.collect();
+    // `apt-get update` is not an install, and neither is
+    // `apt-get install` with the package named nowhere in it.
+    rest.iter().any(|w| *w == "install" || *w == "add") && rest.contains(&package)
+}
+
+/// Whether one tokenised command is the `cargo test` that runs the
+/// cross-validation suite: the target selected BY NAME and the feature
+/// that makes its bodies compile enabled.
+///
+/// Both halves, because either one alone empties the run silently. The
+/// `[[test]]` entry in `Cargo.toml` carries
+/// `required-features = ["qemu-validation"]`, so without the feature
+/// cargo does not build the target; and `tests/qemu_validation.rs`
+/// opens with `#![cfg(feature = "qemu-validation")]`, so if the
+/// `required-features` entry went away the target would build to an
+/// empty binary and report `0 passed` under the suite's own name. That
+/// is #50, and this is the assertion that the pair is still in place.
+///
+/// `--all-features` counts as enabling it: it does.
+fn runs_the_cross_validation_target(words: &[String]) -> bool {
+    let Some(arguments) = cargo_test_arguments(words) else {
+        return false;
+    };
+    let mut selects_the_target = false;
+    let mut enables_the_feature = false;
+    // The option whose value is the NEXT argument, when the previous
+    // argument was one of the two this cares about.
+    let mut expecting: Option<&str> = None;
+    let names_the_feature = |value: &str| value.split(',').any(|f| f == QEMU_FEATURE);
+
+    for argument in arguments {
+        // Everything after `--` belongs to the test harness.
+        if argument == "--" {
+            break;
+        }
+        if let Some(option) = expecting.take() {
+            match option {
+                "--test" => selects_the_target |= argument == QEMU_TARGET,
+                _ => enables_the_feature |= names_the_feature(argument),
+            }
+            continue;
+        }
+        if let Some((option, value)) = argument.split_once('=') {
+            match option {
+                "--test" => selects_the_target |= value == QEMU_TARGET,
+                "--features" | "-F" => enables_the_feature |= names_the_feature(value),
+                _ => {}
+            }
+            continue;
+        }
+        match argument {
+            "--test" => expecting = Some("--test"),
+            "--features" | "-F" => expecting = Some("--features"),
+            "--all-features" => enables_the_feature = true,
+            // `-Fqemu-validation`, cargo's short form with the value
+            // glued on.
+            _ => {
+                if let Some(value) = argument.strip_prefix("-F") {
+                    if !value.is_empty() {
+                        enables_the_feature |= names_the_feature(value);
+                    }
+                }
+            }
+        }
+    }
+    selects_the_target && enables_the_feature
+}
+
+/// THE ORACLE JOB ITSELF IS NOT GUARDED BY ANYTHING ELSE (#97).
+///
+/// `qemu-validation` is the only job in this repository that compares
+/// what we write with an implementation we did not write. Everything
+/// else here agrees with our own reader about our own writer's output,
+/// which is a statement about internal consistency and not about qcow2.
+/// Twenty-five tests hang off it.
+///
+/// Nothing in the repository asserted that the job still exists. The
+/// floor inside it counts what ran, so it sees the suite emptying --
+/// but only if the step is still there to run the count. Delete the job
+/// and every test in this repository stays green: the floor goes with
+/// it, `--all-targets` does not build the target (its `[[test]]` entry
+/// requires the feature), and the guards above ask about `cargo test`
+/// runs without `--release`, which this job's is not the only one of.
+/// Branch protection would then require a context nothing produces,
+/// which blocks merges rather than letting them through -- so the
+/// failure mode is a repository nobody can merge into, with no test
+/// naming the cause.
+///
+/// This asserts the three facts the job is made of, separately, because
+/// they fail separately:
+///
+/// 1. a gating job whose check-run name is `qemu-validation` -- the
+///    exact string `.github-guard` declares as required;
+/// 2. one of its steps installs `qemu-utils`, so `qemu-img` is on
+///    `PATH`. Without it every test in the suite panics in `run_qemu`,
+///    which is loud; but it is the step most likely to be removed as
+///    "the runner has it", and it is what makes the absence of the tool
+///    a failure rather than a skip -- which is the other half of #97;
+/// 3. one of its steps runs `cargo test` selecting `--test
+///    qemu_validation` WITH `--features qemu-validation`. Either half
+///    missing empties the run while it still exits 0.
+///
+/// It deliberately does not read the floor: what the floor is worth is
+/// its own question, and a guard that asserted the whole step verbatim
+/// would fail on every edit to it and be deleted for that.
+#[test]
+fn the_pr_gate_still_cross_validates_against_qemu_img() {
+    let path = ci_yml();
+    let workflow = read_or_panic(&path);
+
+    let job = gating_job_named(&workflow, QEMU_JOB).unwrap_or_else(|| {
+        panic!(
+            "{} defines no gating job whose check-run name is `{QEMU_JOB}`. That \
+             is the only job that compares this crate's output with qemu-img, \
+             it is a required context in .github-guard, and nothing else in \
+             this repository would notice it was gone -- a required check that \
+             no workflow produces blocks every merge instead of gating one.",
+            path.display()
+        )
+    });
+
+    let commands = job_commands(&job);
+
+    assert!(
+        commands
+            .iter()
+            .any(|words| installs_package(words, QEMU_PACKAGE)),
+        "the `{QEMU_JOB}` job in {} no longer installs `{QEMU_PACKAGE}`, so \
+         `qemu-img` is on PATH only if the runner image happens to ship it. \
+         The suite's whole claim is that another implementation agrees with \
+         us; installing the other implementation is not optional.",
+        path.display()
+    );
+
+    assert!(
+        commands
+            .iter()
+            .any(|words| runs_the_cross_validation_target(words)),
+        "the `{QEMU_JOB}` job in {} no longer runs `cargo test --features \
+         {QEMU_FEATURE} --test {QEMU_TARGET}`. Both halves matter: the \
+         `[[test]]` entry requires the feature, so without it the target is \
+         not built, and without the target named this job runs some other \
+         selection under the cross-validation job's name. Either way it exits \
+         0 having cross-validated nothing.",
+        path.display()
+    );
+}
+
+/// The scanner behind `the_pr_gate_still_cross_validates_against_qemu_img`,
+/// checked against the shapes it has to tell apart.
+///
+/// Each of these is a near miss of the real job rather than an obvious
+/// wrong answer: the point of the guard is that the job can be hollowed
+/// out while still looking like itself.
+mod cross_validation_job {
+    use super::{
+        gating_job_named, installs_package, job_commands, runs_the_cross_validation_target,
+        QEMU_JOB, QEMU_PACKAGE,
+    };
+
+    /// The job as `ci.yml` has it, reduced to the three facts the guard
+    /// reads. Every case below is this with one thing changed.
+    const CONTROL: &str = "\
+on:
+  pull_request:
+jobs:
+  qemu-validation:
+    name: qemu-validation
+    steps:
+      - name: install qemu-utils
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
+      - name: qemu cross-validation tests
+        run: |
+          cargo test --locked --features qemu-validation --test qemu_validation
+";
+
+    /// `(job found, installs, runs the target)` for a workflow.
+    fn verdict(workflow: &str) -> (bool, bool, bool) {
+        let Some(job) = gating_job_named(workflow, QEMU_JOB) else {
+            return (false, false, false);
+        };
+        let commands = job_commands(&job);
+        (
+            true,
+            commands
+                .iter()
+                .any(|words| installs_package(words, QEMU_PACKAGE)),
+            commands
+                .iter()
+                .any(|words| runs_the_cross_validation_target(words)),
+        )
+    }
+
+    #[test]
+    fn the_control_shape_satisfies_every_half() {
+        assert_eq!(verdict(CONTROL), (true, true, true));
+    }
+
+    #[test]
+    fn a_job_key_without_a_name_is_still_found_by_its_key() {
+        let without_a_name = CONTROL.replace("    name: qemu-validation\n", "");
+        assert_eq!(
+            verdict(&without_a_name),
+            (true, true, true),
+            "Actions reports a job with no `name:` under its key, so the guard \
+             has to as well"
+        );
+    }
+
+    #[test]
+    fn a_renamed_job_is_not_this_job() {
+        // The key stays, so a guard that looked the job up by key would
+        // still find it -- and the required context, which names the
+        // RENDERED name, would have stopped reporting.
+        let renamed = CONTROL.replace("    name: qemu-validation\n", "    name: qemu\n");
+        assert_eq!(verdict(&renamed), (false, false, false));
+    }
+
+    #[test]
+    fn a_job_that_cannot_fail_a_pull_request_does_not_count() {
+        let conditional = CONTROL.replace(
+            "  qemu-validation:\n",
+            "  qemu-validation:\n    if: github.event_name == 'push'\n",
+        );
+        assert_eq!(verdict(&conditional), (false, false, false));
+
+        let tolerated = CONTROL.replace(
+            "  qemu-validation:\n",
+            "  qemu-validation:\n    continue-on-error: true\n",
+        );
+        assert_eq!(verdict(&tolerated), (false, false, false));
+    }
+
+    #[test]
+    fn a_workflow_that_no_longer_gates_pull_requests_does_not_count() {
+        let pushes_only = CONTROL.replace("  pull_request:\n", "  push:\n");
+        assert_eq!(verdict(&pushes_only), (false, false, false));
+    }
+
+    #[test]
+    fn an_install_step_that_cannot_run_does_not_install() {
+        let conditional = CONTROL.replace(
+            "      - name: install qemu-utils\n",
+            "      - name: install qemu-utils\n        if: runner.os == 'Linux'\n",
+        );
+        assert_eq!(
+            verdict(&conditional),
+            (true, false, true),
+            "an `if:` on the install step means the gate does not depend on it"
+        );
+    }
+
+    #[test]
+    fn updating_the_package_lists_is_not_installing_anything() {
+        let only_update = CONTROL.replace(
+            "sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils",
+            "sudo apt-get update",
+        );
+        assert_eq!(verdict(&only_update), (true, false, true));
+    }
+
+    #[test]
+    fn installing_a_different_package_is_not_installing_this_one() {
+        let other = CONTROL.replace(
+            "--no-install-recommends qemu-utils",
+            "--no-install-recommends qemu-system-x86",
+        );
+        assert_eq!(verdict(&other), (true, false, true));
+    }
+
+    #[test]
+    fn a_package_named_only_in_a_comment_is_not_installed() {
+        let commented = CONTROL.replace(
+            "        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils\n",
+            "        run: |\n          # sudo apt-get install -y qemu-utils\n          sudo apt-get update\n",
+        );
+        assert_eq!(verdict(&commented), (true, false, true));
+    }
+
+    #[test]
+    fn the_spellings_that_really_install_it_still_count() {
+        for command in [
+            "sudo apt-get install -y --no-install-recommends qemu-utils",
+            "sudo apt install -y qemu-utils",
+            "apt-get install qemu-utils",
+            "/usr/bin/apt-get install -y qemu-utils",
+            "brew install qemu-utils",
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-utils",
+        ] {
+            let workflow = CONTROL.replace(
+                "sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils",
+                command,
+            );
+            assert_eq!(
+                verdict(&workflow),
+                (true, true, true),
+                "`{command}` does install the package"
+            );
+        }
+    }
+
+    #[test]
+    fn a_target_selected_without_the_feature_builds_nothing() {
+        let featureless = CONTROL.replace("--features qemu-validation ", "");
+        assert_eq!(
+            verdict(&featureless),
+            (true, true, false),
+            "the [[test]] entry requires the feature, so cargo would not build \
+             the target at all"
+        );
+    }
+
+    #[test]
+    fn the_feature_without_the_target_is_some_other_selection() {
+        let unnamed = CONTROL.replace("--test qemu_validation", "--all-targets");
+        assert_eq!(verdict(&unnamed), (true, true, false));
+    }
+
+    #[test]
+    fn another_targets_name_is_not_this_targets_name() {
+        let elsewhere = CONTROL.replace("--test qemu_validation", "--test synthetic");
+        assert_eq!(verdict(&elsewhere), (true, true, false));
+    }
+
+    #[test]
+    fn a_filter_that_merely_reads_like_the_target_does_not_select_it() {
+        // `cargo test --features qemu-validation qemu_validation` runs
+        // every target and filters by NAME. That is not the same run --
+        // it does not build `tests/qemu_validation.rs` under its
+        // `required-features` entry -- and the option spelling is what
+        // tells them apart.
+        let filtered = CONTROL.replace("--test qemu_validation", "qemu_validation");
+        assert_eq!(verdict(&filtered), (true, true, false));
+    }
+
+    #[test]
+    fn the_spellings_that_really_select_it_still_count() {
+        for command in [
+            "cargo test --locked --features qemu-validation --test qemu_validation",
+            "cargo test --locked --features=qemu-validation --test=qemu_validation",
+            "cargo test --locked -F qemu-validation --test qemu_validation",
+            "cargo test --locked -Fqemu-validation --test qemu_validation",
+            "cargo test --locked --features zstd,qemu-validation --test qemu_validation",
+            "cargo test --locked --all-features --test qemu_validation",
+        ] {
+            let workflow = CONTROL.replace(
+                "cargo test --locked --features qemu-validation --test qemu_validation",
+                command,
+            );
+            assert_eq!(
+                verdict(&workflow),
+                (true, true, true),
+                "`{command}` does run the cross-validation suite"
+            );
+        }
+    }
+
+    #[test]
+    fn a_harness_argument_is_not_cargos() {
+        // Everything after `--` is the test harness's, where
+        // `--features` would be a filter and not a feature.
+        let harness = CONTROL.replace(
+            "cargo test --locked --features qemu-validation --test qemu_validation",
+            "cargo test --locked --test qemu_validation -- --features qemu-validation",
+        );
+        assert_eq!(verdict(&harness), (true, true, false));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE OUTPUT BUDGET
+// ---------------------------------------------------------------------------
+//
+// A test run that prints three thousand lines hides the twenty that matter,
+// and every reader pays for it: a person scrolling, a CI log viewer, and an
+// agent working in the repository, which re-reads its whole transcript on
+// every step and so pays for one loud run many times over. Measured across
+// this constellation: 4,661M cache-read tokens against 9.5M of output, with
+// command output the largest single contributor a repository controls.
+//
+// So every test run in `ci.yml` goes through `scripts/tier.sh`, which writes
+// the whole run to `tmp/logs/<tier>.log`, prints one verdict line, prints the
+// TAIL when the run fails, and fails a run that passed while printing more
+// than its measured budget (exit 65, told apart from a red suite by its
+// status).
+//
+// Three things can rot, and each has an assertion below:
+//
+//   1. a `cargo test` added to the workflow without the wrapper, which is
+//      quiet-by-default decaying back into a convention;
+//   2. a budget of zero, which `output-budget.sh` reads as "no budget" --
+//      the shape that looks like compliance and measures nothing;
+//   3. `chores.yml` and `ci.yml` drifting apart. They MUST carry the same
+//      numbers: a person runs the tiers through `chore` before pushing and
+//      the gate runs them through the workflow, and a tier that fits locally
+//      and not in CI is a gate that only fails after the push. The workflow
+//      cannot read `chores.yml` -- that would mean installing `chore` on
+//      three runner platforms to learn two integers -- so the numbers are
+//      written twice and CHECKED, rather than written twice and trusted.
+//
+// And the floor goes with the tier: wrapping a run must not cost the thing
+// that notices the run executed nothing (#99).
+
+/// `chores.yml`, beside this crate's `Cargo.toml`.
+fn chores_yml() -> PathBuf {
+    manifest_dir().join("chores.yml")
+}
+
+/// A tier's output budget: the two numbers `scripts/tier.sh` passes on to
+/// `output-budget.sh`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Budget {
+    lines: u64,
+    bytes: u64,
+}
+
+/// The tier a command runs and the budget it runs it under, for
+/// `[env|bash] scripts/tier.sh LABEL LOG MAX-LINES MAX-BYTES -- COMMAND...`.
+///
+/// `None` for anything else, INCLUDING a malformed tier invocation: the
+/// numbers are read with `parse`, so `scripts/tier.sh t log a b -- ...`
+/// is not a budget this file will vouch for. `tier.sh` itself exits 2 on
+/// a short argument list, so the two agree about what counts.
+fn tier_invocation(words: &[String]) -> Option<(String, Budget)> {
+    let is_the_tier_script = |w: &&String| {
+        w.rsplit('/').next() == Some("tier.sh") && w.split('/').any(|part| part == "scripts")
+    };
+    let at = words.iter().position(|w| is_the_tier_script(&w))?;
+    if !words[..at]
+        .iter()
+        .all(|w| w == "env" || w == "bash" || w == "sh" || (!w.starts_with('-') && w.contains('=')))
+    {
+        return None;
+    }
+    // LABEL LOG MAX-LINES MAX-BYTES, then `--` and the command.
+    let rest = &words[at + 1..];
+    let log = rest.get(1)?.clone();
+    let lines = rest.get(2)?.parse().ok()?;
+    let bytes = rest.get(3)?.parse().ok()?;
+    if rest.get(4).map(String::as_str) != Some("--") {
+        return None;
+    }
+    Some((log, Budget { lines, bytes }))
+}
+
+/// The tier a `scripts/test-floor.sh TIER FLOOR` command counts, and the
+/// floor it holds it to.
+fn floor_check(words: &[String]) -> Option<(String, u64)> {
+    let is_the_floor_script = |w: &&String| {
+        w.rsplit('/').next() == Some("test-floor.sh") && w.split('/').any(|part| part == "scripts")
+    };
+    let at = words.iter().position(|w| is_the_floor_script(&w))?;
+    if !words[..at]
+        .iter()
+        .all(|w| w == "env" || w == "bash" || w == "sh")
+    {
+        return None;
+    }
+    let rest = &words[at + 1..];
+    Some((rest.first()?.clone(), rest.get(1)?.parse().ok()?))
+}
+
+/// Every command `chores.yml` runs, tokenised with the same grammar the
+/// workflow is read with.
+///
+/// `cmds:` entries that are `- task: other` are mappings rather than
+/// strings and carry no command of their own; they are skipped, and the
+/// task they name is walked in its own right.
+fn chores_commands(text: &str) -> Vec<Vec<String>> {
+    let documents = Yaml::load_from_str(text)
+        .unwrap_or_else(|e| panic!("chores.yml does not parse as YAML: {e}"));
+    let root = documents
+        .first()
+        .unwrap_or_else(|| panic!("chores.yml is empty"));
+    let tasks = field(root, "tasks")
+        .unwrap_or_else(|| panic!("chores.yml has no `tasks:` mapping"))
+        .as_mapping()
+        .unwrap_or_else(|| panic!("chores.yml's `tasks:` is not a mapping"));
+
+    let mut scripts = Vec::new();
+    for (_, task) in tasks.iter() {
+        let Some(cmds) = field(task, "cmds") else {
+            continue;
+        };
+        if let Some(text) = cmds.as_str() {
+            scripts.push(text.to_string());
+        } else if let Some(sequence) = cmds.as_sequence() {
+            for entry in sequence {
+                if let Some(text) = entry.as_str() {
+                    scripts.push(text.to_string());
+                }
+            }
+        }
+    }
+
+    scripts
+        .iter()
+        .flat_map(|script| command_lines(script))
+        .flat_map(|line| shell_commands(&line))
+        .map(|(words, _)| words)
+        .collect()
+}
+
+/// The gating jobs of a workflow, whole -- name included.
+///
+/// [`collect_steps`] flattens jobs away and [`gating_job_named`] wants a
+/// name; the budget assertions need to ask a question PER JOB ("is this
+/// tier counted in the job that ran it?") about jobs whose names are
+/// matrix expressions.
+fn gating_jobs(workflow: &str) -> Vec<Job> {
+    let wf = parse_workflow(workflow);
+    if !runs_on_pull_request(&wf) {
+        return Vec::new();
+    }
+    let carries_a_non_gating_key =
+        |keys: &[String]| keys.iter().any(|k| NON_GATING_KEYS.contains(&k.as_str()));
+    wf.jobs
+        .into_iter()
+        .filter(|job| !carries_a_non_gating_key(&job.keys))
+        .map(|mut job| {
+            job.steps
+                .retain(|step| !carries_a_non_gating_key(&step.keys));
+            job
+        })
+        .collect()
+}
+
+/// Every `cargo test` the pull-request gate runs is wrapped by
+/// `scripts/tier.sh`.
+///
+/// The wrapper is what makes the run quiet, what keeps the whole run in
+/// `tmp/logs/`, and what turns "it printed too much" into a red build. A
+/// `cargo test` added beside the wrapped ones inherits none of that and
+/// nothing else would notice: it passes, it is loud, and loud is not a
+/// failure anybody is paged for.
+#[test]
+fn every_cargo_test_the_gate_runs_is_under_an_output_budget() {
+    let path = ci_yml();
+    let workflow = read_or_panic(&path);
+
+    let mut unbudgeted = Vec::new();
+    let mut budgeted = 0usize;
+    for job in gating_jobs(&workflow) {
+        for words in job_commands(&job) {
+            if cargo_test_arguments(&words).is_none() {
+                continue;
+            }
+            if tier_invocation(&words).is_some() {
+                budgeted += 1;
+            } else {
+                unbudgeted.push(format!("{}: {}", job.name, words.join(" ")));
+            }
+        }
+    }
+
+    assert!(
+        unbudgeted.is_empty(),
+        "{} runs a `cargo test` that is not wrapped by `scripts/tier.sh`, so \
+         its output is unbounded and its full run reaches the job log rather \
+         than `tmp/logs/`:\n  {}\n\
+         Wrap it: `bash scripts/tier.sh LABEL LOG MAX-LINES MAX-BYTES -- cargo \
+         test ...`, with the numbers MEASURED from a run and recorded in the \
+         table at the top of chores.yml.",
+        path.display(),
+        unbudgeted.join("\n  ")
+    );
+    assert!(
+        budgeted > 0,
+        "{} runs no budgeted `cargo test` at all. Either the gate has stopped \
+         testing this crate, or this guard has stopped being able to see that \
+         it does -- and the second is the one that fails silently.",
+        path.display()
+    );
+}
+
+/// No budget is zero, in either file.
+///
+/// `output-budget.sh` reads `0` as "no budget", so a tier given one is
+/// wrapped, logged, quiet -- and unbounded. That is the shape that looks
+/// like compliance from a distance, which is exactly why it gets a number
+/// of its own rather than being left to a reader.
+#[test]
+fn every_output_budget_is_a_number_that_can_fail_a_run() {
+    for path in [ci_yml(), chores_yml()] {
+        let text = read_or_panic(&path);
+        let commands: Vec<Vec<String>> = if path.ends_with("chores.yml") {
+            chores_commands(&text)
+        } else {
+            gating_jobs(&text).iter().flat_map(job_commands).collect()
+        };
+
+        let mut tiers = 0usize;
+        for words in &commands {
+            let Some((log, budget)) = tier_invocation(words) else {
+                continue;
+            };
+            tiers += 1;
+            assert!(
+                budget.lines > 0 && budget.bytes > 0,
+                "the `{log}` tier in {} carries the budget {budget:?}. \
+                 output-budget.sh reads 0 as \"no budget\", so this tier is \
+                 quiet and unbounded -- it can grow without limit and nothing \
+                 turns red.",
+                path.display()
+            );
+        }
+        assert!(
+            tiers > 0,
+            "{} runs no tier through `scripts/tier.sh`. If the tiers moved, \
+             this guard moved with them and now checks nothing.",
+            path.display()
+        );
+    }
+}
+
+/// `chores.yml` and `ci.yml` carry the SAME budget and the SAME floor for
+/// every tier they share, and the workflow runs no tier the chores file
+/// does not.
+///
+/// The numbers are written twice because the workflow cannot read
+/// `chores.yml` without installing `chore` on ubuntu, macOS and Windows to
+/// learn two integers. Written twice and trusted, they drift -- and the
+/// direction that hurts is the quiet one: a budget raised in `ci.yml` to
+/// get a push through leaves `chore test` failing on a tree the gate
+/// accepts, and a floor lowered in one file is a floor lowered.
+///
+/// It also refuses a tier the workflow runs and `chore test` cannot: that
+/// is the tier nobody can reproduce locally before pushing.
+#[test]
+fn the_workflow_and_the_chores_file_agree_on_every_budget_and_floor() {
+    let workflow_path = ci_yml();
+    let chores_path = chores_yml();
+    let workflow_commands: Vec<Vec<String>> = gating_jobs(&read_or_panic(&workflow_path))
+        .iter()
+        .flat_map(job_commands)
+        .collect();
+    let chores = chores_commands(&read_or_panic(&chores_path));
+
+    let budgets = |commands: &[Vec<String>]| -> BTreeMap<String, Budget> {
+        commands.iter().filter_map(|w| tier_invocation(w)).collect()
+    };
+    let floors = |commands: &[Vec<String>]| -> BTreeMap<String, u64> {
+        commands.iter().filter_map(|w| floor_check(w)).collect()
+    };
+
+    let (workflow_budgets, chores_budgets) = (budgets(&workflow_commands), budgets(&chores));
+    let (workflow_floors, chores_floors) = (floors(&workflow_commands), floors(&chores));
+
+    for (tier, budget) in &workflow_budgets {
+        let Some(theirs) = chores_budgets.get(tier) else {
+            panic!(
+                "{} runs the `{tier}` tier and {} does not, so `chore test` \
+                 cannot reproduce what the gate runs. Every tier belongs in \
+                 both files.",
+                workflow_path.display(),
+                chores_path.display()
+            );
+        };
+        assert_eq!(
+            budget,
+            theirs,
+            "the `{tier}` tier is budgeted {budget:?} in {} and {theirs:?} in \
+             {}. One of the two was changed on its own; a budget that differs \
+             between the two is a tier that fits in one place and not the \
+             other, which is a gate that only fails after the push.",
+            workflow_path.display(),
+            chores_path.display()
+        );
+    }
+
+    for (tier, floor) in &workflow_floors {
+        let Some(theirs) = chores_floors.get(tier) else {
+            panic!(
+                "{} holds the `{tier}` tier to a floor of {floor} and {} holds \
+                 it to none. The floor is what notices a tier that ran \
+                 nothing (#99); it belongs in both files.",
+                workflow_path.display(),
+                chores_path.display()
+            );
+        };
+        assert_eq!(
+            floor,
+            theirs,
+            "the `{tier}` tier's executed-test floor is {floor} in {} and \
+             {theirs} in {}. A floor only ever goes up, and it goes up in both \
+             files at once.",
+            workflow_path.display(),
+            chores_path.display()
+        );
+    }
+}
+
+/// A wrapped test tier is still COUNTED, in the job that ran it.
+///
+/// The floors were inline in the workflow before the wrapper existed, and
+/// moving a run behind `scripts/tier.sh` is exactly the edit that could
+/// drop one: the step gets shorter, the suite still passes, and the thing
+/// that notices `0 passed; 0 failed` is gone. `cargo test` exits 0 on a
+/// selection that matches nothing, so without the floor the quietest
+/// possible tier -- the one that ran no test at all -- is also the one that
+/// fits its budget best.
+#[test]
+fn every_budgeted_test_tier_still_counts_what_ran() {
+    let path = ci_yml();
+    let workflow = read_or_panic(&path);
+
+    let mut checked = 0usize;
+    for job in gating_jobs(&workflow) {
+        let commands = job_commands(&job);
+        let counted: BTreeSet<String> = commands
+            .iter()
+            .filter_map(|w| floor_check(w))
+            .map(|(tier, _)| tier)
+            .collect();
+        for words in &commands {
+            if cargo_test_arguments(words).is_none() {
+                continue;
+            }
+            let Some((tier, _)) = tier_invocation(words) else {
+                continue; // the unbudgeted case has its own assertion
+            };
+            assert!(
+                counted.contains(&tier),
+                "the `{}` job in {} runs the `{tier}` test tier under a budget \
+                 and never counts it. `cargo test` exits 0 having run nothing, \
+                 so this job would report green on an empty selection -- and \
+                 an empty run is the one that fits its output budget best. Add \
+                 `bash scripts/test-floor.sh {tier} N` after it, with N \
+                 MEASURED and roughly a tenth below what ran.",
+                job.name,
+                path.display()
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 0,
+        "{} runs no budgeted test tier, so this guard checked nothing.",
+        path.display()
+    );
+}
+
+/// The readers behind the four budget assertions, checked against the
+/// shapes they have to tell apart.
+///
+/// Each case is a NEAR MISS of a real invocation rather than an obvious
+/// wrong answer: the failure this whole section exists for is a tier that
+/// still looks like a tier while measuring nothing.
+mod output_budget_guard {
+    use super::{cargo_test_arguments, floor_check, tier_invocation, without_the_tier_wrapper};
+
+    fn words(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn a_wrapped_cargo_test_is_still_a_cargo_test() {
+        let w = words(
+            "bash scripts/tier.sh label debug 380 26000 -- cargo test --locked --all-targets",
+        );
+        assert_eq!(
+            cargo_test_arguments(&w),
+            Some(vec!["--locked", "--all-targets"]),
+            "the wrapper hid the run from every guard in this file, which \
+             would leave them reporting that the workflow has no debug run"
+        );
+    }
+
+    #[test]
+    fn an_unwrapped_cargo_test_is_unchanged() {
+        let w = words("cargo test --locked --release");
+        assert_eq!(without_the_tier_wrapper(&w), &w[..]);
+    }
+
+    #[test]
+    fn a_wrapper_this_file_does_not_know_is_not_unwrapped() {
+        // The strict direction: an unrecognised wrapper means the run does
+        // not count, which fails loudly, rather than being waved through.
+        let w = words("sudo scripts/tier.sh label debug 1 1 -- cargo test --locked");
+        assert_eq!(without_the_tier_wrapper(&w), &w[..]);
+        assert_eq!(cargo_test_arguments(&w), None);
+    }
+
+    #[test]
+    fn a_merely_echoed_tier_invocation_is_not_one() {
+        let w = words("echo scripts/tier.sh label debug 380 26000 -- cargo test");
+        assert_eq!(tier_invocation(&w), None);
+        assert_eq!(cargo_test_arguments(&w), None);
+    }
+
+    #[test]
+    fn a_script_that_merely_ends_in_tier_sh_is_not_the_tier_script() {
+        // `vendor/other-tier.sh` ends in the right three characters and is
+        // not this repository's wrapper.
+        let w = words("bash vendor/my-tier.sh label debug 380 26000 -- cargo test");
+        assert_eq!(tier_invocation(&w), None);
+    }
+
+    #[test]
+    fn a_tier_invocation_yields_its_log_and_both_numbers() {
+        let w = words("bash scripts/tier.sh qemu-validation qemu 130 9000 -- cargo test");
+        let (log, budget) = tier_invocation(&w).expect("a well-formed tier invocation");
+        assert_eq!(log, "qemu");
+        assert_eq!((budget.lines, budget.bytes), (130, 9000));
+    }
+
+    #[test]
+    fn a_tier_invocation_with_no_separator_is_not_vouched_for() {
+        // `tier.sh` itself exits 2 on this, and a reader that accepted it
+        // would report a budget on a command that never ran.
+        assert_eq!(
+            tier_invocation(&words("bash scripts/tier.sh l log 10 20")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_budget_that_is_not_a_number_is_not_a_budget() {
+        assert_eq!(
+            tier_invocation(&words("bash scripts/tier.sh l log many lots -- cargo test")),
+            None,
+            "a non-numeric budget must not be read as a budget: it would be \
+             passed to output-budget.sh, which reads it as 0 -- no budget at \
+             all -- while this file reported one"
+        );
+    }
+
+    #[test]
+    fn an_environment_prefix_does_not_hide_a_tier() {
+        let w = words("EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh l debug 380 26000 -- cargo test --locked");
+        assert!(tier_invocation(&w).is_some());
+        assert_eq!(cargo_test_arguments(&w), Some(vec!["--locked"]));
+    }
+
+    #[test]
+    fn a_floor_check_yields_its_tier_and_its_number() {
+        assert_eq!(
+            floor_check(&words("bash scripts/test-floor.sh debug 210")),
+            Some(("debug".to_string(), 210))
+        );
+        assert_eq!(
+            floor_check(&words("echo scripts/test-floor.sh debug 210")),
+            None
+        );
+        assert_eq!(
+            floor_check(&words("bash scripts/test-floor.sh debug")),
+            None
         );
     }
 }
