@@ -6,5 +6,9 @@
 # consumer to copy out of (`chore artifact` prints this directory).
 /dist/
 
+# Test tier logs (scripts/tier.sh) and the scratch a test run owns. Derived
+# data: the whole of every run is here, and CI uploads it as an artefact.
+/tmp/
+
 # chore fingerprint cache (sources:/generates: checksums). Derived data.
 .chore/

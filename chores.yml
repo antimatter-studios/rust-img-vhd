@@ -24,6 +24,65 @@ chore_min_version: 0.6.0
 # so a consumer given only vhd.h cannot compile. The path below is the same
 # one Cargo.toml resolves am-fs-core from, and NOTHING CHECKS THAT THE TWO
 # AGREE.
+# QUIET BY DEFAULT, --verbose ON REQUEST, AND THE BUDGET IS A NUMBER.
+#
+#   A test task prints a VERDICT: one line per tier, a final count, and the
+#   path of the log holding everything else. A failure prints the TAIL of
+#   that log. `chore test -- --verbose` (or FLTH_VERBOSE=1) streams the whole
+#   run as it happens.
+#
+#   Nothing is thrown away: every tier's output goes to tmp/logs/<tier>.log
+#   in full, and CI uploads that directory as an artefact. What changed is
+#   where it is read from.
+#
+#   Each tier carries an OUTPUT BUDGET -- a line count and a byte count that
+#   fail the run (exit 65) when the tier prints more than it is allowed to,
+#   told apart from a failing suite by its status. The budgets below are
+#   MEASURED, on an arm64 Linux host, and confirmed against the verdict lines
+#   of the CI run recorded in the pull request that introduced them -- the
+#   largest of the three matrix legs in each case.
+#
+#     tier     measured        budget         headroom, and why
+#     debug      316 / 19,852    400 / 27,000  ~27% / ~36%: 254 executed
+#                                              tests at one line each, over
+#                                              nine binaries. The job has a
+#                                              separate build step, so no
+#                                              `Compiling` lines land here
+#     release    316 / 19,852    400 / 27,000  the same selection in the other
+#                                              profile. The job has no
+#                                              separate build step, so a cold
+#                                              cache puts ~70 `Compiling`
+#                                              lines in this tier too
+#     qemu        20 /  1,080    120 /  9,000  12 cross-validated images, plus
+#                                              the cold-cache compile of a
+#                                              target nothing else builds --
+#                                              the feature gate keeps it out
+#                                              of `--all-targets`
+#
+#   Raise one DELIBERATELY when a tier grows, the way the executed-test
+#   floors are raised -- and raise it in .github/workflows/ci.yml at the same
+#   time, because tests/ci_profile.rs fails when the two files disagree. A
+#   budget nobody can breach measures nothing.
+#
+#   THE FLOORS ARE THE OTHER HALF. A budget fails a tier that PRINTS too
+#   much; nothing fails a tier that prints almost nothing because it RAN
+#   almost nothing, and `cargo test` exits 0 on "0 passed; 0 failed". So
+#   every tier also says how few executed tests still count as having run it.
+#   Measured, and they only ever go up.
+#
+#   Why it is worth a task's while: a passing run that prints three hundred
+#   lines hides the ten that matter, and every reader pays for it -- a person
+#   scrolling, a CI log viewer, and an agent working here, which re-reads its
+#   transcript on every step and so pays for one loud run many times over.
+#   Measured across this constellation: 4,661M cache-read tokens against
+#   9.5M of output, with command output the largest single contributor a
+#   repository controls.
+#
+#   WHERE THE SCRIPT CAME FROM. scripts/output-budget.sh is a vendored copy
+#   of fs-linux-test-harness's, at v0.1.0; the header of that file says why a
+#   copy rather than the sibling the filesystem crates read it from, and
+#   tests/output_budget.rs holds the copy to the behaviour rather than to the
+#   bytes.
 vars:
   TRIPLE: aarch64-apple-darwin
   # `[package].name` is am-img-vhd; `[lib].name` is vhd, so cargo writes
@@ -133,8 +192,53 @@ tasks:
     cmds: ['cargo build']
 
   test:
-    desc: Test suite
-    cmds: ['cargo test']
+    desc: 'Every tier the gate runs: debug (the only profile that can see an overflow), release (the profile that ships), and the qemu-img cross-validation'
+    # NOT `cargo test`. That ran the debug tier and nothing else, so the
+    # two runs CI gates on -- the release profile and the qemu-img
+    # cross-validation -- were first exercised after the push. These are
+    # the same three tasks .github/workflows/ci.yml runs, with the same
+    # budgets and the same floors; tests/ci_profile.rs checks that the
+    # two files still agree.
+    cmds:
+      - task: test:debug
+      - task: test:release
+      - task: test:qemu
+      # THE LAST LINE: one number across the tiers, and where the detail is.
+      - bash scripts/test-verdict.sh debug release qemu
+
+  test:debug:
+    desc: 'The suite in the debug profile, where overflow checks are on'
+    # EXPECT_OVERFLOW_CHECKS ARMS THE ONE CHECK A TEXT SCAN CANNOT DO:
+    # `overflow_checks::the_build_the_gate_asked_to_check_does_check` in
+    # src/lib.rs asks the build to prove it traps, rather than inferring
+    # it from which spellings of "disabled" are absent from Cargo.toml.
+    # Do not add `--release` here; tests/ci_profile.rs refuses a
+    # workflow with no such run, and the reason is the same one.
+    cmds:
+      - 'EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets'
+      - 'bash scripts/test-floor.sh debug 228'
+
+  test:release:
+    desc: 'The suite in the profile that ships: no debug_assert!, arithmetic wraps'
+    # NOT A DUPLICATE OF test:debug. Debug turns an integer overflow into
+    # a panic and release lets it wrap, so a test guarding a wrapping
+    # computation passes the debug run for the WRONG reason. See the note
+    # on the `test-release` job in .github/workflows/ci.yml.
+    cmds:
+      - 'bash scripts/tier.sh "test (release)" release 400 27000 -- cargo test --locked --release --all-targets'
+      - 'bash scripts/test-floor.sh release 228'
+
+  test:qemu:
+    desc: 'The qemu-img cross-validation: another implementation reads what we wrote'
+    # NEEDS qemu-img ON PATH. `--test qemu_validation` names one
+    # integration target and `--features qemu-validation` is what makes
+    # the bodies in it compile to anything, so a renamed target, a
+    # renamed feature, or a `#[cfg(feature = ...)]` that stops matching
+    # leaves this exiting 0 having cross-validated nothing -- and the
+    # debug tier's own count would not move by one.
+    cmds:
+      - 'bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation'
+      - 'bash scripts/test-floor.sh qemu 10'
 
   clean:
     desc: Remove this crate's cargo output
