@@ -1,0 +1,93 @@
+name: fuzz
+
+# The explorer half of the fuzzing setup. The gate half --
+# tests/fuzz_decoders.rs -- runs in the ordinary test job on every pull
+# request, because it is deterministic and finishes in under a second.
+# This one is neither, and that is why it is here instead.
+#
+# A fuzzer's result depends on how long it ran. Putting it in the pull
+# request gate would mean a fresh finding fails whichever unrelated
+# change happened to be open, and a green result would only ever mean
+# "nothing found in the seconds we could spare".
+#
+# So it runs nightly and on demand, and when it finds something the
+# reproducer is uploaded. That reproducer belongs in fuzz/corpus/, where
+# the gate replays it on every pull request from then on.
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target"
+        required: false
+        default: "300"
+  schedule:
+    - cron: "0 3 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+defaults:
+  run:
+    working-directory: rust-img-vhd
+
+jobs:
+  fuzz:
+    name: fuzz the footer, dynamic header and BAT parsers
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Checked out into a named directory, with the sibling beside it,
+      # exactly as ci.yml does -- the path dependency is `../rust-fs-core`
+      # and `fuzz/` reaches it as `../../rust-fs-core`.
+      - uses: actions/checkout@v4
+        with:
+          path: rust-img-vhd
+      - uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          ref: v0.2.10
+          path: rust-fs-core
+
+      # Nightly, not the pin in rust-toolchain.toml. cargo-fuzz needs
+      # `-Z sanitizer`, which stable does not have. The explicit
+      # `+nightly` in scripts/fuzz-all.sh overrides the pin for these
+      # invocations and nothing else.
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      # Building cargo-fuzz takes several minutes and changes about as
+      # often as the compiler does, so it is cached on its own version
+      # rather than on this repository's lockfile.
+      - name: Cache cargo-fuzz
+        id: cache-cargo-fuzz
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Install cargo-fuzz
+        if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
+        run: cargo +nightly install cargo-fuzz --locked
+
+      - name: Show what the corpus holds
+        run: |
+          find fuzz/corpus -type f | sort
+          echo "total: $(find fuzz/corpus -type f | wc -l) seeds"
+
+      - name: Fuzz
+        run: ./scripts/fuzz-all.sh "${{ inputs.seconds || '300' }}"
+
+      # WITHOUT THIS THE FINDING IS LOST. A crash reproducer lives in
+      # fuzz/artifacts/<target>/ on the runner, and the runner is thrown
+      # away. The log would say a target crashed and the bytes that
+      # caused it would be gone, leaving the next person to re-derive an
+      # input the fuzzer had already found.
+      - name: Keep the reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: rust-img-vhd/fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 90

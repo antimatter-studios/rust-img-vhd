@@ -6,6 +6,11 @@ license = "MIT"
 description = "Pure-Rust VHD (Microsoft Virtual Hard Disk) reader. Fixed, dynamic, and differencing variants. Exposes a Rust API and a C ABI suitable for FFI from C/C++/Go/Swift."
 repository = "https://github.com/antimatter-studios/rust-img-vhd"
 
+# The fuzz crate is its own package, on its own toolchain, and is not
+# part of this one. Without this, `cargo package` and `cargo publish`
+# try to include it and fail on the nightly-only dependency.
+exclude = ["fuzz"]
+
 [lib]
 # Published as `am-img-vhd` on crates.io; consumers `use vhd::Reader`.
 name = "vhd"
