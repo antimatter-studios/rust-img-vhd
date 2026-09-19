@@ -89,9 +89,4 @@
 # the "test / <os>" job-matrix spelling, and "test (release)" with literal
 # parentheses and no slash.
 [checks]
-	required = fmt
-	required = qemu-validation
-	required = test (release)
-	required = test / ubuntu-latest
-	required = test / macos-latest
-	required = test / windows-latest
+	required = ci-ok
