@@ -9,6 +9,23 @@ never does.
 
 ### Added
 
+- **The footer, dynamic header and BAT parsers are fuzzed, on two tiers.**
+  A VHD footer is 512 bytes of almost entirely attacker-controlled
+  geometry — cylinders, heads, sectors-per-track, `current_size`,
+  `block_size` — multiplied together on the read path, and none of it had
+  a fuzz target. `fuzz/` holds `image`, `footer` and `dynamic_header` and
+  runs nightly on a bounded budget; `tests/fuzz_decoders.rs` is the gate,
+  replaying and mutating the same corpus deterministically on the stable
+  toolchain.
+
+  The corpus is three images `qemu-img` wrote — dynamic, fixed, and
+  dynamic with `force_size` — and
+  `the_corpus_reads_back_what_qemu_img_wrote` requires this crate to
+  return the pattern `qemu-img` put there, hole included. It also asserts
+  the primary footer was believed rather than the mirror, which is a very
+  different bug from a read returning the wrong bytes and would otherwise
+  be invisible (#93).
+
 - **`VhdReader::create_dynamic`, and `vhd_tool create-dynamic` and `write`.**
   The only image the crate could make was an empty fixed one, so the
   dynamic write path -- BAT allocation, bitmaps, the moving footer -- had
