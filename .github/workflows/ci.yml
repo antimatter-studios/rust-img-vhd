@@ -40,65 +40,58 @@ jobs:
       - name: build
         run: cargo build --locked --all-targets
       - name: test
+        # QUIET BY DEFAULT: the whole run goes to tmp/logs/debug.log and is
+        # uploaded below; this step prints a verdict line and the
+        # executed-test count. A failure prints the tail of the log. See the
+        # measured budget table at the top of chores.yml, and scripts/tier.sh.
+        #
         # EXPECT_OVERFLOW_CHECKS ARMS THE ONE CHECK A TEXT SCAN CANNOT DO.
-        # This run has no `--release`, so overflow-checks are on, and it
-        # is what makes every arithmetic test in this crate mean anything.
+        # This run has no `--release`, so overflow-checks are on, and it is
+        # what makes every arithmetic test in this crate mean anything. The
+        # variable tells `overflow_checks::the_build_the_gate_asked_to_check
+        # _does_check` in src/lib.rs that THIS is the run that must trap an
+        # overflow. It stays in the `env:` mapping rather than moving inline:
+        # it is a fact about the run's environment, and one mapping states it
+        # once. Do not add `--release` and do not drop the variable:
+        # tests/ci_profile.rs reads this file and fails if no `cargo test` in
+        # it runs without `--release` while setting it (#59).
         #
-        # The variable tells `overflow_checks::the_build_the_gate_asked_to
-        # _check_does_check` in src/lib.rs that THIS is the run that must
-        # trap an overflow -- asking the build directly rather than
-        # inferring it from which spellings of "disabled" happen to be
-        # absent from Cargo.toml. It is declared as an `env:` mapping
-        # rather than inline as `VAR=1 cargo test` because this job also
-        # runs on windows-latest, where that prefix is a PowerShell
-        # syntax error.
+        # THE FLOOR, BECAUSE THE FAILURE MODE HERE IS AN ABSENCE. `cargo
+        # test` exits 0 on "0 passed; 0 failed", so a filter that selects
+        # nothing, a build that produced no test binaries, and a suite that
+        # compiled itself away all report exactly the green a full run
+        # reports -- and the empty run is also the one that fits its output
+        # budget best. See antimatter-studios/diskjockey#197. Measured on
+        # 2026-09-17 from run 35176485318 (main, 2847b3a): 215 executed on
+        # ubuntu-latest and macos-latest, 214 on windows-latest, over nine
+        # binaries; this branch runs 254. The floor is 228, and it
+        # moves up with the suite and never down.
         #
-        # Do not add `--release` to this run, and do not drop the
-        # variable: tests/ci_profile.rs reads this file and fails if no
-        # `cargo test` in it runs without `--release` while setting this.
-        # See #59.
+        # THE TRAP AND THE REDIRECTION ARE GONE because scripts/tier.sh does
+        # both: it redirects rather than pipes, so the status stays cargo's,
+        # and it prints the tail when the run fails. The whole log is kept
+        # and uploaded rather than pasted into this one.
         #
-        # `shell: bash` because the floor below is a shell script and the
-        # default shell on the windows-latest leg is PowerShell, where
-        # `$(...)`, `[ ... ]` and `trap` do not mean what they mean here.
-        # The handshake stays in the `env:` mapping rather than moving
-        # inline now that bash runs on every leg: it is a fact about the
-        # run's environment, and one mapping states it once.
+        # `shell: bash` on every leg, because the tier scripts are bash and
+        # the default shell on windows-latest is PowerShell.
         shell: bash
         run: |
-          # A FLOOR, BECAUSE THE FAILURE MODE HERE IS AN ABSENCE.
-          # `cargo test` exits 0 on "0 passed; 0 failed", so a filter that
-          # selects nothing, a build that produced no test binaries, and a
-          # suite that compiled itself away all report exactly the green a
-          # full run reports. Nothing above reads the number, so only a
-          # count can tell them apart. See antimatter-studios/diskjockey#197.
-          #
-          # Measured on 2026-09-17 from run 35176485318 (main, 2847b3a):
-          # 215 tests executed on ubuntu-latest and macos-latest and 214 on
-          # windows-latest, over nine binaries. The floor is 200 -- below
-          # the smallest of those by enough that deleting a test is not a
-          # CI failure, and far above the empty run it exists to catch. It
-          # moves up with the suite and never down.
-          #
-          # THE OUTPUT GOES TO A FILE AND IS PRINTED BY THE TRAP RATHER
-          # THAN PIPED THROUGH `tee`. tests/ci_profile.rs refuses to count
-          # a `cargo test` whose exit status a pipe discards, and it is
-          # right to: Actions runs a `run:` block without `pipefail` by
-          # default, so a pipeline's status is `tee`'s and a red suite
-          # would leave this step green. Piping here would fail both
-          # workflow assertions in that file, which is the guard working.
-          # The trap prints the log on the way out either way -- including
-          # when the suite failed and `errexit` ended the step at that line.
-          trap 'cat "$RUNNER_TEMP/test.log"' EXIT
-          cargo test --locked --all-targets > "$RUNNER_TEMP/test.log" 2>&1
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test.log" | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 200)"
-          if [ "$n" -lt 200 ]; then
-              echo "::error::only $n tests executed, floor is 200 -- 214 to 215 ran on 2026-09-17 in run 35176485318, and a run that executes fewer than that stopped early rather than passed"
-              exit 1
-          fi
+          bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets
+          bash scripts/test-floor.sh debug 228
         env:
           EXPECT_OVERFLOW_CHECKS: "1"
+      - name: keep the tier log
+        # `always()`, so the log survives the failure it exists to explain.
+        # A failing tier already prints its tail into this job log; this is
+        # what keeps the WHOLE run once the runner is gone, which the `trap`
+        # it replaces could not do.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-logs-test-${{ matrix.os }}
+          path: rust-img-vhd/tmp/logs/
+          if-no-files-found: warn
+          retention-days: 7
       - name: clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
@@ -179,50 +172,32 @@ jobs:
         with:
           workspaces: rust-img-vhd
       - name: test --release
+        # ITS OWN TIER AND ITS OWN NUMBER, NOT THE MATRIX'S. It builds the
+        # same targets today and counts roughly the same number, but it is a
+        # different `cargo test` in a different profile: a release-only
+        # build failure, a `#[cfg(debug_assertions)]` that takes a module out
+        # of the release build, or a future narrowing of this command empties
+        # this run without touching the matrix, and a floor shared with it
+        # would be satisfied by the other job while proving nothing at all
+        # about this one.
+        #
+        # Measured on 2026-09-18 from run 35292775981: 215 executed; this
+        # branch runs 254, and the floor is 228 -- the same number
+        # as the matrix, checked separately because nothing makes them stay
+        # equal.
+        shell: bash
         run: |
-          # ITS OWN FLOOR, NOT THE MATRIX'S, BECAUSE THIS IS A SEPARATE
-          # RUN SELECTION. It builds the same targets today and counts
-          # roughly the same number, but it is a different `cargo test`
-          # in a different profile, and the ways it can empty out are
-          # its own: a release-only build failure, a
-          # `#[cfg(debug_assertions)]` that takes a module out of this
-          # build alone, or a future narrowing of this command. Any of
-          # those leaves the matrix above untouched and fully green, so
-          # a floor shared with it would be satisfied by the other job
-          # while proving nothing at all about this one. See the floor
-          # in the `test` job for why a green `cargo test` is not
-          # evidence on its own -- it exits 0 on "0 passed; 0 failed",
-          # which is antimatter-studios/diskjockey#197.
-          #
-          # Measured on 2026-09-18 from run 35292775981 (PR #88,
-          # 9ac9a57): 215 tests executed in the release profile, over
-          # nine binaries -- the same 215 the ubuntu-latest debug leg
-          # ran that day, which is the point: the count matches and the
-          # profile does not. The floor is 190, roughly a tenth below,
-          # so deleting a test is not a CI failure and an emptied run
-          # still cannot pass. It moves up with the suite and never
-          # down.
-          #
-          # THE OUTPUT GOES TO A FILE AND IS PRINTED BY THE TRAP RATHER
-          # THAN PIPED THROUGH `tee`, for the reason spelled out on the
-          # `test` job: Actions runs a `run:` block without `pipefail`,
-          # so a pipeline hands this step `tee`'s exit status and a red
-          # suite would report green. tests/ci_profile.rs refuses to
-          # count a `cargo test` whose status a pipe discards, and the
-          # trap prints the log on the way out either way -- including
-          # when errexit ended the step at the `cargo test` line.
-          trap 'cat "$RUNNER_TEMP/test-release.log"' EXIT
-          cargo test --locked --release --all-targets > "$RUNNER_TEMP/test-release.log" 2>&1
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test-release.log" | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 190)"
-          if [ "$n" -lt 190 ]; then
-              echo "::error::only $n release-profile tests executed, floor is 190 -- 215 ran on 2026-09-18 in run 35292775981, and a run that executes fewer than that stopped early rather than passed"
-              exit 1
-          fi
+          bash scripts/tier.sh "test (release)" release 400 27000 -- cargo test --locked --release --all-targets
+          bash scripts/test-floor.sh release 228
+      - name: keep the tier log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-logs-release
+          path: rust-img-vhd/tmp/logs/
+          if-no-files-found: warn
+          retention-days: 7
 
-  # Cross-validates our reader/writer against `qemu-img`. qemu-img is
-  # invoked as a subprocess only — never linked, never bundled. The
-  # qemu-utils package is installed only on the CI runner.
   qemu-validation:
     name: qemu-validation
     runs-on: ubuntu-latest
@@ -249,34 +224,40 @@ jobs:
         with:
           workspaces: rust-img-vhd
       - name: qemu cross-validation tests
+        # A FLOOR, AND ITS OWN, BECAUSE THIS RUN SELECTS BY NAME.
+        # `--test qemu_validation` names one integration target, and
+        # `--features qemu-validation` is what makes the bodies in it compile
+        # to anything: the `test` legs build the same file with the feature
+        # off and run 0 tests out of it. So a renamed target, a renamed
+        # feature, or a `#[cfg(feature = ...)]` that stops matching leaves
+        # this job exiting 0 having cross-validated nothing, and the floor on
+        # the `test` legs cannot see it -- their own count would not move by
+        # one.
+        #
+        # Measured on 2026-09-17 from run 35176485318 (main, 2847b3a): 12
+        # executed. The floor is 10: small enough that removing a case is not
+        # a CI failure, and still an assertion that the suite ran rather than
+        # evaporated.
+        #
+        # THE JOB ITSELF IS GUARDED NOW TOO.
+        # `the_pr_gate_still_cross_validates_against_qemu_img` in
+        # tests/ci_profile.rs reads this file and fails unless a gating job
+        # named `qemu-validation` installs `qemu-utils` and runs `--features
+        # qemu-validation --test qemu_validation`. Before it, deleting this
+        # whole job left every test in the repository green -- the floor goes
+        # with the step it lives in (#91).
+        shell: bash
         run: |
-          # A FLOOR, AND ITS OWN, BECAUSE THIS RUN SELECTS BY NAME.
-          # `--test qemu_validation` names one integration target, and
-          # `--features qemu-validation` is what makes the bodies in it
-          # compile to anything: the `test` legs build the same file with
-          # the feature off and run 0 tests out of it. So a renamed target,
-          # a renamed feature, or a `#[cfg(feature = ...)]` that stops
-          # matching leaves this job exiting 0 having cross-validated
-          # nothing, and the floor on the `test` legs cannot see it --
-          # their own count would not move by one.
-          #
-          # Measured on 2026-09-17 from run 35176485318 (main, 2847b3a):
-          # 12 tests executed. The floor is 10: small enough that removing
-          # a case is not a CI failure, and still an assertion that the
-          # suite ran rather than evaporated.
-          #
-          # Redirected and printed by the trap rather than piped through
-          # `tee`, for the same reason as the `test` job above: a pipe
-          # would hand this step `tee`'s exit status instead of the
-          # suite's, and Actions runs this block without `pipefail`.
-          trap 'cat "$RUNNER_TEMP/qemu-validation.log"' EXIT
-          cargo test --locked --features qemu-validation --test qemu_validation > "$RUNNER_TEMP/qemu-validation.log" 2>&1
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/qemu-validation.log" | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 10)"
-          if [ "$n" -lt 10 ]; then
-              echo "::error::only $n qemu cross-validation tests executed, floor is 10 -- 12 ran on 2026-09-17 in run 35176485318, and a run that executes fewer than that stopped early rather than passed"
-              exit 1
-          fi
+          bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation
+          bash scripts/test-floor.sh qemu 10
+      - name: keep the tier log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-logs-qemu
+          path: rust-img-vhd/tmp/logs/
+          if-no-files-found: warn
+          retention-days: 7
 
   fmt:
     name: fmt
