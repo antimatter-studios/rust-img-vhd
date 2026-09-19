@@ -270,3 +270,42 @@ jobs:
           components: rustfmt
       - name: fmt --check
         run: cargo fmt --check
+
+  # ONE CHECK GATES A MERGE, AND IT STANDS FOR EVERY JOB (#90).
+  #
+  # Branch protection names checks, and a check is a job name, so the
+  # required list is a copy of those names kept in a different system
+  # from the file that produces them. Rename a job and the required
+  # check is a name nothing reports — permanently pending, nothing
+  # merges, no failure to point at. Add one and it gates nobody.
+  #
+  # `if: always()` because a job that was cancelled or skipped is not a
+  # job that passed, and an aggregate that only ran when its needs
+  # succeeded would be skipped itself — and a skipped required check
+  # never reports at all.
+  ci-ok:
+    name: ci-ok
+    needs: [test, test-release, qemu-validation, fmt]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: every gating job must have concluded success
+        run: |
+          echo "test: ${{ needs.test.result }}"
+          echo "test-release: ${{ needs.test-release.result }}"
+          echo "qemu-validation: ${{ needs.qemu-validation.result }}"
+          echo "fmt: ${{ needs.fmt.result }}"
+          failed=0
+          for one in "test:${{ needs.test.result }}" \
+                     "test-release:${{ needs.test-release.result }}" \
+                     "qemu-validation:${{ needs.qemu-validation.result }}" \
+                     "fmt:${{ needs.fmt.result }}"; do
+              job=${one%%:*}
+              result=${one#*:}
+              if [ "$result" != "success" ]; then
+                  echo "::error::$job concluded '$result', not 'success' -- failure, cancellation and skipping all mean the gate did not run to completion"
+                  failed=1
+              fi
+          done
+          [ "$failed" = 0 ] || exit 1
+          echo "all gating jobs succeeded"
