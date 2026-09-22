@@ -272,5 +272,6 @@ tasks:
   lint:
     desc: Formatting and clippy, exactly as CI runs them
     cmds:
+      - scripts/agents-core-check.sh
       - cargo fmt --check
       - cargo clippy --locked --all-targets -- -D warnings

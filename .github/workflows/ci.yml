@@ -270,6 +270,12 @@ jobs:
           components: rustfmt
       - name: fmt --check
         run: cargo fmt --check
+      - name: the agent guide carries the shared block
+        # AGENTS.md embeds agent-core, byte-identical with every sibling. This
+        # runs the script directly rather than through `chore lint`, because
+        # CI here does not install chore -- a guard wired only into a task
+        # nothing runs is a guard that reports protection it is not providing.
+        run: scripts/agents-core-check.sh
 
   # ONE CHECK GATES A MERGE, AND IT STANDS FOR EVERY JOB (#90).
   #
