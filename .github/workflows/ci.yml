@@ -270,6 +270,8 @@ jobs:
           components: rustfmt
       - name: fmt --check
         run: cargo fmt --check
+      - name: the one required check stands for every job
+        run: scripts/ci-gate.sh
       - name: the agent guide carries the shared block
         # AGENTS.md embeds agent-core, byte-identical with every sibling. This
         # runs the script directly rather than through `chore lint`, because
