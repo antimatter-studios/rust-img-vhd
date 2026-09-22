@@ -272,5 +272,19 @@ tasks:
   lint:
     desc: Formatting and clippy, exactly as CI runs them
     cmds:
+      - scripts/agents-core-check.sh
       - cargo fmt --check
       - cargo clippy --locked --all-targets -- -D warnings
+
+  check:ci-gate:
+    desc: The one required check stands for every job in ci.yml
+    # A chore task naming a script, and nothing else -- the script is what can
+    # be tested, reviewed and run without chore at all.
+    #
+    # This was tests/ci_aggregate_gate.rs. It was the wrong container twice
+    # over: it parses a YAML file and compares strings, exercising nothing this
+    # crate ships, and as a cargo test it counted towards the executed-test
+    # floor the gate itself enforces -- so the suite could satisfy its floor
+    # partly by checking its own CI config.
+    cmds:
+      - scripts/ci-gate.sh
