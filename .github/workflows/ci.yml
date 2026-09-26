@@ -19,17 +19,51 @@ jobs:
     defaults:
       run:
         working-directory: rust-img-vhd
+    # WHERE THE OUTPUT-BUDGET WRAPPER COMES FROM, for every step in this job
+    # that runs the suite -- scripts/tier.sh reads it, and so do the resolver
+    # tests in tests/output_budget.rs, which cargo test runs.
+    #
+    # Relative to the repository, which is what tier.sh resolves a relative
+    # FS_CORE_ROOT against: `${{ github.workspace }}` is a backslash path on
+    # windows-latest, and Git Bash can neither test nor copy one.
+    env:
+      FS_CORE_ROOT: ../rust-fs-core-budget
     steps:
       - name: checkout am-img-vhd
         uses: actions/checkout@v4
         with:
           path: rust-img-vhd
+      # TWO CHECKOUTS OF CORE, BECAUSE THEY ARE TWO DIFFERENT PINS.
+      #
+      # This one is the PATH DEPENDENCY the crate compiles against, and it
+      # cannot move. rust-fs-core#75 made a write past the end of a
+      # `FileDevice` a refusal, and appending a block is how this format
+      # allocates: measured on 2026-09-26, this crate's suite against core
+      # v0.2.11 and against v0.2.13 fails 7 tests in tests/synthetic.rs, every
+      # one of them a write landing exactly at the device's current end;
+      # against v0.2.10, none. See #96, #99 and rust-fs-core#147/#129.
       - name: checkout am-fs-core (sibling path dep)
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
           ref: v0.2.10
           path: rust-fs-core
+      # And this one is the TOOLING pin. It carries scripts/output-budget.sh,
+      # which scripts/tier.sh resolves, verifies by its --version and copies
+      # for the length of a run; the wrapper is rust-fs-core's and is
+      # deliberately not committed here (rust-fs-core#153), so there is
+      # nothing local to fall back to and a job that runs the suite needs it.
+      # v0.2.11 first packaged the script and v0.2.13 is where a failing tier
+      # became quiet, so this pin cannot go below v0.2.13.
+      #
+      # The two collapse back into one the day #96/#99 let the dependency
+      # move forward.
+      - name: checkout am-fs-core (the output-budget wrapper)
+        uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          ref: v0.2.13
+          path: rust-fs-core-budget
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -42,7 +76,8 @@ jobs:
       - name: test
         # QUIET BY DEFAULT: the whole run goes to tmp/logs/debug.log and is
         # uploaded below; this step prints a verdict line and the
-        # executed-test count. A failure prints the tail of the log. See the
+        # executed-test count. A failure prints one line naming its status and
+        # that log, which is uploaded below. See the
         # measured budget table at the top of chores.yml, and scripts/tier.sh.
         #
         # EXPECT_OVERFLOW_CHECKS ARMS THE ONE CHECK A TEXT SCAN CANNOT DO.
@@ -69,8 +104,8 @@ jobs:
         #
         # THE TRAP AND THE REDIRECTION ARE GONE because scripts/tier.sh does
         # both: it redirects rather than pipes, so the status stays cargo's,
-        # and it prints the tail when the run fails. The whole log is kept
-        # and uploaded rather than pasted into this one.
+        # and it names the log when the run fails. The whole log is kept and
+        # uploaded rather than pasted into this one.
         #
         # `shell: bash` on every leg, because the tier scripts are bash and
         # the default shell on windows-latest is PowerShell.
@@ -82,9 +117,10 @@ jobs:
           EXPECT_OVERFLOW_CHECKS: "1"
       - name: keep the tier log
         # `always()`, so the log survives the failure it exists to explain.
-        # A failing tier already prints its tail into this job log; this is
-        # what keeps the WHOLE run once the runner is gone, which the `trap`
-        # it replaces could not do.
+        # A failing tier prints one line naming this log rather than pasting
+        # its end into the job output; THIS is what keeps the whole run once
+        # the runner is gone, which the `trap` it replaces could not do, and
+        # it is why the quiet failure loses nothing.
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -154,17 +190,51 @@ jobs:
     defaults:
       run:
         working-directory: rust-img-vhd
+    # WHERE THE OUTPUT-BUDGET WRAPPER COMES FROM, for every step in this job
+    # that runs the suite -- scripts/tier.sh reads it, and so do the resolver
+    # tests in tests/output_budget.rs, which cargo test runs.
+    #
+    # Relative to the repository, which is what tier.sh resolves a relative
+    # FS_CORE_ROOT against: `${{ github.workspace }}` is a backslash path on
+    # windows-latest, and Git Bash can neither test nor copy one.
+    env:
+      FS_CORE_ROOT: ../rust-fs-core-budget
     steps:
       - name: checkout am-img-vhd
         uses: actions/checkout@v4
         with:
           path: rust-img-vhd
+      # TWO CHECKOUTS OF CORE, BECAUSE THEY ARE TWO DIFFERENT PINS.
+      #
+      # This one is the PATH DEPENDENCY the crate compiles against, and it
+      # cannot move. rust-fs-core#75 made a write past the end of a
+      # `FileDevice` a refusal, and appending a block is how this format
+      # allocates: measured on 2026-09-26, this crate's suite against core
+      # v0.2.11 and against v0.2.13 fails 7 tests in tests/synthetic.rs, every
+      # one of them a write landing exactly at the device's current end;
+      # against v0.2.10, none. See #96, #99 and rust-fs-core#147/#129.
       - name: checkout am-fs-core (sibling path dep)
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
           ref: v0.2.10
           path: rust-fs-core
+      # And this one is the TOOLING pin. It carries scripts/output-budget.sh,
+      # which scripts/tier.sh resolves, verifies by its --version and copies
+      # for the length of a run; the wrapper is rust-fs-core's and is
+      # deliberately not committed here (rust-fs-core#153), so there is
+      # nothing local to fall back to and a job that runs the suite needs it.
+      # v0.2.11 first packaged the script and v0.2.13 is where a failing tier
+      # became quiet, so this pin cannot go below v0.2.13.
+      #
+      # The two collapse back into one the day #96/#99 let the dependency
+      # move forward.
+      - name: checkout am-fs-core (the output-budget wrapper)
+        uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          ref: v0.2.13
+          path: rust-fs-core-budget
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -204,17 +274,51 @@ jobs:
     defaults:
       run:
         working-directory: rust-img-vhd
+    # WHERE THE OUTPUT-BUDGET WRAPPER COMES FROM, for every step in this job
+    # that runs the suite -- scripts/tier.sh reads it, and so do the resolver
+    # tests in tests/output_budget.rs, which cargo test runs.
+    #
+    # Relative to the repository, which is what tier.sh resolves a relative
+    # FS_CORE_ROOT against: `${{ github.workspace }}` is a backslash path on
+    # windows-latest, and Git Bash can neither test nor copy one.
+    env:
+      FS_CORE_ROOT: ../rust-fs-core-budget
     steps:
       - name: checkout am-img-vhd
         uses: actions/checkout@v4
         with:
           path: rust-img-vhd
+      # TWO CHECKOUTS OF CORE, BECAUSE THEY ARE TWO DIFFERENT PINS.
+      #
+      # This one is the PATH DEPENDENCY the crate compiles against, and it
+      # cannot move. rust-fs-core#75 made a write past the end of a
+      # `FileDevice` a refusal, and appending a block is how this format
+      # allocates: measured on 2026-09-26, this crate's suite against core
+      # v0.2.11 and against v0.2.13 fails 7 tests in tests/synthetic.rs, every
+      # one of them a write landing exactly at the device's current end;
+      # against v0.2.10, none. See #96, #99 and rust-fs-core#147/#129.
       - name: checkout am-fs-core (sibling path dep)
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
           ref: v0.2.10
           path: rust-fs-core
+      # And this one is the TOOLING pin. It carries scripts/output-budget.sh,
+      # which scripts/tier.sh resolves, verifies by its --version and copies
+      # for the length of a run; the wrapper is rust-fs-core's and is
+      # deliberately not committed here (rust-fs-core#153), so there is
+      # nothing local to fall back to and a job that runs the suite needs it.
+      # v0.2.11 first packaged the script and v0.2.13 is where a failing tier
+      # became quiet, so this pin cannot go below v0.2.13.
+      #
+      # The two collapse back into one the day #96/#99 let the dependency
+      # move forward.
+      - name: checkout am-fs-core (the output-budget wrapper)
+        uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          ref: v0.2.13
+          path: rust-fs-core-budget
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - uses: dtolnay/rust-toolchain@stable
