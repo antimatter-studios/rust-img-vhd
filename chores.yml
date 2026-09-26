@@ -27,9 +27,10 @@ chore_min_version: 0.6.0
 # QUIET BY DEFAULT, --verbose ON REQUEST, AND THE BUDGET IS A NUMBER.
 #
 #   A test task prints a VERDICT: one line per tier, a final count, and the
-#   path of the log holding everything else. A failure prints the TAIL of
-#   that log. `chore test -- --verbose` (or FLTH_VERBOSE=1) streams the whole
-#   run as it happens.
+#   path of the log holding everything else. A failure prints one line naming
+#   its status and that log; `--tail N`, or OUTPUT_BUDGET_FAIL_TAIL=N, asks
+#   for the end of it as well. `chore test -- --verbose` (or
+#   OUTPUT_BUDGET_VERBOSE=1) streams the whole run as it happens.
 #
 #   Nothing is thrown away: every tier's output goes to tmp/logs/<tier>.log
 #   in full, and CI uploads that directory as an artefact. What changed is
@@ -78,11 +79,24 @@ chore_min_version: 0.6.0
 #   9.5M of output, with command output the largest single contributor a
 #   repository controls.
 #
-#   WHERE THE SCRIPT CAME FROM. scripts/output-budget.sh is a vendored copy
-#   of fs-linux-test-harness's, at v0.1.0; the header of that file says why a
-#   copy rather than the sibling the filesystem crates read it from, and
-#   tests/output_budget.rs holds the copy to the behaviour rather than to the
-#   bytes.
+#   WHERE THE SCRIPT COMES FROM. The wrapper the budgets are enforced by is
+#   rust-fs-core's scripts/output-budget.sh, and THERE IS NO COPY OF IT HERE:
+#   scripts/tier.sh resolves it at run time, checks it answers
+#   'rust-fs-core-output-budget 1' to --version, copies it into tmp/ for the
+#   length of the run and deletes it afterwards. It looks at $FS_CORE_ROOT
+#   first, then the ../rust-fs-core sibling, then wherever cargo says the
+#   am-fs-core package is, and it FAILS rather than falling back to anything
+#   local. A committed copy is a copy that drifts, which is the whole of
+#   antimatter-studios/rust-fs-core#153; tests/output_budget.rs holds the
+#   resolver to that, including both refusals.
+#
+#   The wrapper ships in core from v0.2.11 and has been quiet on failure
+#   since v0.2.13, which is BELOW the v0.2.10 this crate compiles against
+#   (#96, #99). That is why .github/workflows/ci.yml checks core out twice
+#   and points FS_CORE_ROOT at the second one. On a machine whose
+#   ../rust-fs-core is held at v0.2.10 for the same reason, set FS_CORE_ROOT
+#   to a checkout that has the script -- tier.sh takes a path relative to
+#   this repository.
 vars:
   TRIPLE: aarch64-apple-darwin
   # `[package].name` is am-img-vhd; `[lib].name` is vhd, so cargo writes

@@ -30,6 +30,16 @@ qemu-validation = []
 
 [dependencies]
 # Block-device trait surface — `Qcow2Reader`-style integration.
+#
+# HELD AT 0.2.10, AND IT IS NOT AN OVERSIGHT. rust-fs-core#75 made a write
+# past the end of a `FileDevice` a refusal, and appending a block is how this
+# format allocates: measured on 2026-09-26, the suite fails 7 tests in
+# tests/synthetic.rs against both v0.2.11 and v0.2.13 and none against
+# v0.2.10. See #96, #99 and AGENTS.md, "The pin you cannot bump, and why".
+#
+# It says nothing about scripts/output-budget.sh, which is core's and is
+# resolved by scripts/tier.sh from a SEPARATE, newer checkout -- see
+# AGENTS.md, "The output budget comes from rust-fs-core".
 am-fs-core = { path = "../rust-fs-core", version = "0.2.10" }
 
 [dev-dependencies]

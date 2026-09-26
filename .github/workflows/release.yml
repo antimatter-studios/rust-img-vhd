@@ -16,12 +16,28 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    # The suite runs through scripts/tier.sh, and tests/output_budget.rs runs
+    # tier.sh itself, so this job needs the core checkout that carries the
+    # output-budget wrapper. Relative to the repository, which is what
+    # tier.sh resolves a relative FS_CORE_ROOT against.
+    env:
+      FS_CORE_ROOT: ../rust-fs-core-budget
     steps:
       - uses: actions/checkout@v5
 
+      # THE COMPILE PIN. v0.2.10 is the last release this crate's write path
+      # works against -- see the note in .github/workflows/ci.yml, #96 and
+      # #99 -- so it does not move with the tooling pin below.
       - name: clone am-fs-core sibling
         shell: bash
         run: git clone --depth 1 --branch v0.2.10 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+
+      # THE TOOLING PIN. scripts/output-budget.sh is rust-fs-core's, is not
+      # committed here (rust-fs-core#153), and ships from v0.2.11; v0.2.13 is
+      # where a failing tier became quiet.
+      - name: clone am-fs-core for the output-budget wrapper
+        shell: bash
+        run: git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core-budget
 
       - uses: dtolnay/rust-toolchain@stable
         with:

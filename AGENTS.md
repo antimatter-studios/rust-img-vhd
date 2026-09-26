@@ -177,8 +177,10 @@ against `v0.2.10`. Every one is a write landing exactly at the device's current
 end.
 
 Do **not** bump the pin, and do **not** "fix" it by reverting #75 — that
-reintroduces #70. Tracked as rust-fs-core#147/#129; the agreed replacement is
-`BlockDevice::set_len` plus `can_grow()`.
+reintroduces #70. Tracked as rust-fs-core#147/#129 and, on this side, as #96
+and #99; the agreed replacement is `BlockDevice::set_len` plus `can_grow()`.
+Re-measured on 2026-09-26 against core `v0.2.11` and `v0.2.13`: 7 failures in
+`tests/synthetic.rs` each time, against none on `v0.2.10`.
 
 One practical consequence: `pre-commit.d/rust-clippy.sh` runs clippy without
 `--locked`, so a `../rust-fs-core` checkout that is semver-ahead of the pin
@@ -187,6 +189,42 @@ commit over a file the commit never contained. That is a livelock
 (agent-skills#64). Work from a throwaway worktree with `../rust-fs-core` at
 `v0.2.10` rather than reaching for `--no-verify`, which disables every guard at
 once.
+
+## The output budget comes from rust-fs-core
+
+`scripts/tier.sh` runs every tier through rust-fs-core's
+`scripts/output-budget.sh`, and **there is no copy of that script in this
+repository**. `tier.sh` resolves it when a tier starts: `$FS_CORE_ROOT`
+first, then the `../rust-fs-core` sibling, then whatever `cargo metadata`
+says the `am-fs-core` package root is. It verifies whichever it found by
+running it with `--version` and requiring exactly
+`rust-fs-core-output-budget 1`, copies it to `tmp/output-budget.$$.sh` for the
+length of the run, and removes it on exit.
+
+Every one of those steps FAILS LOUDLY rather than falling back: an absent core
+stops the run, and so does a present-but-wrong one. The contract is the
+`--version` string and **not** a SHA-256 the way `rust-fs-ntfs` pins one — a
+digest in every consumer is the lockstep this arrangement exists to remove.
+See rust-fs-core#153, and `tests/output_budget.rs`, which is now a test of the
+resolver rather than of a vendored copy.
+
+**Two pins, and here they disagree.** The wrapper ships in core from `v0.2.11`
+and has been quiet on failure since `v0.2.13` — both above the `v0.2.10` this
+crate compiles against, for the reason in the section above. So the workflows
+check core out **twice**, at `v0.2.10` for the path dependency and at
+`v0.2.13` for the wrapper, and point `FS_CORE_ROOT` at the second. They
+collapse into one checkout the day #96/#99 land.
+
+The same applies to the throwaway worktree that section recommends: with
+`../rust-fs-core` held at `v0.2.10` there is no wrapper to resolve, so set
+`FS_CORE_ROOT` to a checkout that has one. `tier.sh` accepts a path relative
+to this repository, which is also the only spelling Git Bash can use on the
+Windows leg.
+
+**The verbose variable is `OUTPUT_BUDGET_VERBOSE`.** It was `FLTH_VERBOSE`
+while the script was vendored, and core's does not read the old name: setting
+it does nothing, quietly. `chore test -- --verbose` maps the flag onto the
+right one.
 
 ## What gates a merge
 
