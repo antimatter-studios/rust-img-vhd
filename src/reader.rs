@@ -764,6 +764,35 @@ impl VhdReader {
         self.dev.flush().map_err(fs_core_to_vhd_error)
     }
 
+    /// Make the device long enough that a write ending at `end` lands.
+    ///
+    /// # WHY THIS EXISTS AT ALL
+    ///
+    /// `write_at` used to extend a `FileDevice` implicitly, and that is
+    /// how this format allocated: write the new block past the old end,
+    /// then record where it went. `am-fs-core` withdrew that (#75), and
+    /// correctly -- the file grew while `size_bytes()` went on reporting
+    /// the length taken at open, so a caching device could hold bytes no
+    /// bounded read could reach (rust-fs-core#70). `set_len` is the
+    /// replacement: growth that says so, and moves the reported length
+    /// with it.
+    ///
+    /// # IT ONLY EVER GROWS
+    ///
+    /// `BlockDevice::set_len` *sets*: a smaller `new_len` truncates,
+    /// exactly as [`std::fs::File::set_len`] does. Nothing in this crate
+    /// wants that -- an allocation appends -- so the current length is
+    /// read first and a device already long enough is left alone. That
+    /// also keeps a writable but fixed-length device (a block device
+    /// node, a pre-sized image) working for every allocation that fits
+    /// inside it, instead of failing on a `set_len` it never needed.
+    fn dev_grow_to(&self, end: u64) -> Result<()> {
+        if self.dev.size_bytes() >= end {
+            return Ok(());
+        }
+        self.dev.set_len(end).map_err(fs_core_to_vhd_error)
+    }
+
     /// Is the sector at `sector_in_block` present in this image?
     ///
     /// # The bit order is the format's, not an arbitrary choice
@@ -1132,6 +1161,32 @@ impl VhdReader {
         // window in which the image had no footer.
         let bat_value = bat_entry_for(new_block_off)?;
         let new_footer_off = new_block_off + block_total;
+
+        // MAKE ROOM FIRST: NOTHING BELOW EXTENDS THE FILE BY WRITING PAST
+        // ITS END ANY MORE (#99).
+        //
+        // `am-fs-core` 0.2.12 is where an allocation stops being an
+        // implicit `ftruncate` hidden inside a write. `write_at` refuses
+        // anything ending past `size_bytes()`, so the footer's new copy --
+        // the first write below, and the one that used to do the growing --
+        // comes back `OutOfBounds` on an unchanged image.
+        //
+        // THE LENGTH IS THE FOOTER'S END, NOT THE BLOCK'S, AND THE
+        // DIFFERENCE IS NOT A ROUNDING. The refusal it replaces reported
+        // `OutOfBounds { offset: 7168, len: 512, size: 3072 }`: the
+        // allocation begins at 3072, which is the old end, and the write
+        // that lands is 4096 bytes further on. Growing to the end of the
+        // range being written would leave the whole block unreachable. The
+        // file has to reach past everything this allocation touches, and
+        // the trailing footer is the last of it.
+        //
+        // Doing it here rather than at each write also covers the zero-init
+        // loop and the BAT entry below: both land under `new_footer_off`.
+        let new_end = new_footer_off
+            .checked_add(FOOTER_SIZE as u64)
+            .ok_or(Error::Corrupt("allocation runs past the end of the device"))?;
+        self.dev_grow_to(new_end)?;
+
         // A SHORT WRITE HERE IS THE ONE FAILURE THE ORDER CANNOT ABSORB. The
         // footer's new copy extends the file, and a write that lands part of
         // it leaves the file ending mid-sector with no footer at the end --
@@ -1145,10 +1200,10 @@ impl VhdReader {
         }
         self.dev_flush()?;
 
-        // Step 1: zero-init bitmap + data area at the new tail.
-        // FileDevice's write_at extends the file as needed; on
-        // non-growable BlockDevice impls this surfaces an I/O error
-        // up to the caller, which is the right behaviour.
+        // Step 1: zero-init bitmap + data area at the new tail. The
+        // device was grown above, so every write here is inside it --
+        // `write_at` no longer extends anything, and on a device that
+        // refused to grow this function has already returned that error.
         // IN CHUNKS, not in one buffer the size of a block.
         //
         // `block_size` comes from the dynamic header, which is checked

@@ -280,7 +280,20 @@ impl fs_core::BlockRead for CountingReads {
         fs_core::BlockRead::size_bytes(&self.inner)
     }
 }
-impl fs_core::BlockDevice for CountingReads {}
+// THE DEFAULTS ARE NOT INHERITED, THEY ARE ASSERTED. `set_len` and
+// `can_grow` are defaulted on the trait, so a wrapper that leaves them
+// alone answers `Err(ReadOnly)` / `false` for a device that would have
+// answered otherwise -- silently, because it compiles. This one wraps a
+// read-only `FileDevice`, which refuses both anyway; forwarding says so
+// because the inner device said so, rather than by accident.
+impl fs_core::BlockDevice for CountingReads {
+    fn set_len(&self, new_len: u64) -> fs_core::Result<()> {
+        fs_core::BlockDevice::set_len(&self.inner, new_len)
+    }
+    fn can_grow(&self) -> bool {
+        fs_core::BlockDevice::can_grow(&self.inner)
+    }
+}
 
 /// Open `path` on a counting device, with the counter reset after open.
 fn open_counting(path: &Path) -> (VhdReader, Arc<CountingReads>) {
@@ -1581,7 +1594,14 @@ fn an_unreadable_mirror_reports_the_trailing_footer_error() {
             fs_core::BlockRead::size_bytes(&self.0)
         }
     }
-    impl fs_core::BlockDevice for NoSectorZero {}
+    impl fs_core::BlockDevice for NoSectorZero {
+        fn set_len(&self, new_len: u64) -> fs_core::Result<()> {
+            fs_core::BlockDevice::set_len(&self.0, new_len)
+        }
+        fn can_grow(&self) -> bool {
+            fs_core::BlockDevice::can_grow(&self.0)
+        }
+    }
 
     let (path, _) = dynamic_with_damaged_footer("footer_mirror_unreadable", false);
     let dev = NoSectorZero(fs_core::FileDevice::open(&path).unwrap());
@@ -2247,6 +2267,17 @@ impl fs_core::BlockDevice for FailingWrites {
     fn is_writable(&self) -> bool {
         true
     }
+    /// FORWARDED, BECAUSE THE DEFAULT WOULD REFUSE. This double exists
+    /// to fail a chosen *write*; a `set_len` left to the trait default
+    /// returns `Err(ReadOnly)` and the allocation never reaches the
+    /// write the case is about, so every injected failure would be
+    /// reported at the wrong step.
+    fn set_len(&self, new_len: u64) -> fs_core::Result<()> {
+        fs_core::BlockDevice::set_len(&self.inner, new_len)
+    }
+    fn can_grow(&self) -> bool {
+        fs_core::BlockDevice::can_grow(&self.inner)
+    }
 }
 
 /// The first allocation lands exactly on the trailing footer, and the
@@ -2367,4 +2398,158 @@ fn an_allocation_refused_by_its_bat_entry_does_not_touch_the_image() {
         "a refused allocation changed the file's length"
     );
     VhdReader::open(&path).expect("a refused write must leave the image openable");
+}
+
+// ---------------------------------------------------------------------------
+// An allocation asks for the room before it writes (#99)
+// ---------------------------------------------------------------------------
+
+/// Records every `set_len`, and every `write_at` that was outside the
+/// device when it was issued, before forwarding both.
+///
+/// The second list is what makes this more than a call counter: the
+/// contract is not "`set_len` was called" but "no write ever ran off the
+/// end", and only the device can say whether a given write was inside
+/// it at the moment it arrived.
+struct RecordsGrowth {
+    inner: fs_core::FileDevice,
+    set_lens: std::sync::Mutex<Vec<u64>>,
+    writes_past_the_end: std::sync::Mutex<Vec<(u64, usize, u64)>>,
+}
+
+impl fs_core::BlockRead for RecordsGrowth {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+    fn size_bytes(&self) -> u64 {
+        fs_core::BlockRead::size_bytes(&self.inner)
+    }
+}
+
+impl fs_core::BlockDevice for RecordsGrowth {
+    fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+        let size = fs_core::BlockRead::size_bytes(&self.inner);
+        if offset + buf.len() as u64 > size {
+            self.writes_past_the_end
+                .lock()
+                .unwrap()
+                .push((offset, buf.len(), size));
+        }
+        fs_core::BlockDevice::write_at(&self.inner, offset, buf)
+    }
+    fn flush(&self) -> fs_core::Result<()> {
+        fs_core::BlockDevice::flush(&self.inner)
+    }
+    fn is_writable(&self) -> bool {
+        fs_core::BlockDevice::is_writable(&self.inner)
+    }
+    fn set_len(&self, new_len: u64) -> fs_core::Result<()> {
+        self.set_lens.lock().unwrap().push(new_len);
+        fs_core::BlockDevice::set_len(&self.inner, new_len)
+    }
+    fn can_grow(&self) -> bool {
+        fs_core::BlockDevice::can_grow(&self.inner)
+    }
+}
+
+/// ONE GROW PER ALLOCATION, AND IT REACHES THE END OF THE NEW FOOTER.
+///
+/// The length asked for is not the end of the write that prompted it.
+/// An allocation begins at the old trailing footer and the write that
+/// used to extend the file -- the footer's new copy -- lands a whole
+/// block further on, so the refusal this replaces reported a *gap*:
+/// `OutOfBounds { offset: 7168, len: 512, size: 3072 }`. Growing to the
+/// end of that write alone would leave the block between the two
+/// unreachable, and every read of it short.
+///
+/// So the number is pinned, not merely the call: block start + bitmap +
+/// block + footer, which is what `file_len_after_allocations` already
+/// says the file must end up being.
+#[test]
+fn an_allocation_grows_the_device_once_to_the_end_of_the_new_footer() {
+    let path = tmp_path("alloc_grows_to_footer_end");
+    build_dynamic_vhd_all_sparse(&path);
+
+    let dev = Arc::new(RecordsGrowth {
+        inner: fs_core::FileDevice::open_rw(&path).unwrap(),
+        set_lens: std::sync::Mutex::new(Vec::new()),
+        writes_past_the_end: std::sync::Mutex::new(Vec::new()),
+    });
+    let r = VhdReader::open_rw_on_device(dev.clone()).unwrap();
+    r.write_at(0, &[0xAB; 16]).unwrap();
+    r.flush_writes().unwrap();
+
+    assert_eq!(
+        *dev.set_lens.lock().unwrap(),
+        vec![file_len_after_allocations(1)],
+        "one allocation must ask for the room once, up to the new footer's end"
+    );
+    assert!(
+        dev.writes_past_the_end.lock().unwrap().is_empty(),
+        "an allocation still wrote past the device's end: {:?}",
+        dev.writes_past_the_end.lock().unwrap()
+    );
+
+    // A second write into the block just allocated needs no more room.
+    r.write_at(32, &[0xCD; 16]).unwrap();
+    assert_eq!(
+        dev.set_lens.lock().unwrap().len(),
+        1,
+        "writing inside an allocated block asked the device to grow again"
+    );
+}
+
+/// A device that will not grow gets a refusal, not a half-written image.
+///
+/// `can_grow` is `false` and `set_len` refuses -- a block device node, a
+/// fixed-length slice -- and the allocation is the first thing in the
+/// function, before the footer is rewritten and before anything is
+/// zeroed. So the file must come back byte-identical, which is a
+/// stronger statement than "it still opens".
+#[test]
+fn an_allocation_onto_a_device_that_cannot_grow_leaves_the_image_untouched() {
+    struct NeverGrows(fs_core::FileDevice);
+    impl fs_core::BlockRead for NeverGrows {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+            self.0.read_at(offset, buf)
+        }
+        fn size_bytes(&self) -> u64 {
+            fs_core::BlockRead::size_bytes(&self.0)
+        }
+    }
+    impl fs_core::BlockDevice for NeverGrows {
+        fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+            fs_core::BlockDevice::write_at(&self.0, offset, buf)
+        }
+        fn flush(&self) -> fs_core::Result<()> {
+            fs_core::BlockDevice::flush(&self.0)
+        }
+        fn is_writable(&self) -> bool {
+            true
+        }
+        // `set_len` and `can_grow` are left to the trait defaults on
+        // purpose: `Err(ReadOnly)` and `false` are exactly what a
+        // fixed-length writable device answers.
+    }
+
+    let path = tmp_path("alloc_on_a_fixed_length_device");
+    build_dynamic_vhd_all_sparse(&path);
+    let before = std::fs::read(&*path).unwrap();
+    {
+        let dev = Arc::new(NeverGrows(fs_core::FileDevice::open_rw(&path).unwrap()));
+        let r = VhdReader::open_rw_on_device(dev).unwrap();
+        let err = r
+            .write_at(0, &[0xAB; 16])
+            .expect_err("a device that cannot grow cannot take a new block");
+        assert!(
+            matches!(err, vhd::Error::ReadOnly(_)),
+            "a refused grow must surface as the device's refusal, got {err:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&*path).unwrap(),
+        before,
+        "an allocation that could not get its room still changed the image"
+    );
+    VhdReader::open(&path).expect("the image must still open");
 }

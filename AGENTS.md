@@ -160,35 +160,35 @@ exactly the operation the core pin below is about.
 Both profiles are run deliberately: arithmetic that panics in debug can wrap
 silently in release. `tests/ci_profile.rs` holds the debug run to being one.
 
-## The pin you cannot bump, and why
+## The pin, and why it sat still
 
-This crate depends on `am-fs-core` and is **pinned to `v0.2.10`**, one release
-behind, and that is deliberate.
+This crate depends on `am-fs-core` at **`v0.2.12`**. It was held at `v0.2.10`
+for a while, and the reason still shapes the write path.
 
 `4e19fc9` (rust-fs-core#75) made a write past the end of a `FileDevice` a
 refusal rather than an implicit extension. It was right to — `size_bytes()`
 reported the construction-time length while the file grew underneath it, so
 `CachingDevice` could serve bytes no cached read could reach (#70). But writing
-past the end was **the only way this format allocates**: append a block, cluster
-or grain, then record where it went.
+past the end was **the only way this format allocates**: append a block, then
+record where it went. Against `v0.2.11` and `v0.2.13` that cost 7 failures in
+`tests/synthetic.rs`, every one a write landing exactly at the device's end.
 
-Measured against core `main`: vhd 7 failures, qcow2 3, vhdx 1, vmdk 1; zero
-against `v0.2.10`. Every one is a write landing exactly at the device's current
-end.
-
-Do **not** bump the pin, and do **not** "fix" it by reverting #75 — that
-reintroduces #70. Tracked as rust-fs-core#147/#129 and, on this side, as #96
-and #99; the agreed replacement is `BlockDevice::set_len` plus `can_grow()`.
-Re-measured on 2026-09-26 against core `v0.2.11` and `v0.2.13`: 7 failures in
-`tests/synthetic.rs` each time, against none on `v0.2.10`.
+The fix is `BlockDevice::set_len` plus `can_grow()`, first released in core
+`v0.2.12` (rust-fs-core#147/#129; #96 and #99 here).
+`VhdReader::allocate_block_locked` grows the device to the end of the
+footer's new copy **before** it writes anything, so a device that cannot grow
+refuses the allocation with the image untouched. Do **not** "fix" a refused
+write by reverting #75 — that reintroduces #70. A test double that wraps a
+device must forward `set_len` and `can_grow`: the trait defaults answer
+`Err(ReadOnly)` / `false`, and it compiles.
 
 One practical consequence: `pre-commit.d/rust-clippy.sh` runs clippy without
 `--locked`, so a `../rust-fs-core` checkout that is semver-ahead of the pin
 rewrites your unstaged `Cargo.lock`, and `rust-deps-pinned.sh` then blocks the
 commit over a file the commit never contained. That is a livelock
 (agent-skills#64). Work from a throwaway worktree with `../rust-fs-core` at
-`v0.2.10` rather than reaching for `--no-verify`, which disables every guard at
-once.
+the pinned tag rather than reaching for `--no-verify`, which disables every
+guard at once.
 
 ## The output budget comes from rust-fs-core
 
@@ -209,14 +209,14 @@ See rust-fs-core#153, and `tests/output_budget.rs`, which is now a test of the
 resolver rather than of a vendored copy.
 
 **Two pins, and here they disagree.** The wrapper ships in core from `v0.2.11`
-and has been quiet on failure since `v0.2.13` — both above the `v0.2.10` this
-crate compiles against, for the reason in the section above. So the workflows
-check core out **twice**, at `v0.2.10` for the path dependency and at
-`v0.2.13` for the wrapper, and point `FS_CORE_ROOT` at the second. They
-collapse into one checkout the day #96/#99 land.
+and has been quiet on failure since `v0.2.13` — above the `v0.2.12` this
+crate compiles against. So the workflows check core out **twice**, at
+`v0.2.12` for the path dependency and at `v0.2.13` for the wrapper, and point
+`FS_CORE_ROOT` at the second. They collapse into one checkout when the
+dependency reaches `v0.2.13`.
 
 The same applies to the throwaway worktree that section recommends: with
-`../rust-fs-core` held at `v0.2.10` there is no wrapper to resolve, so set
+`../rust-fs-core` held at `v0.2.12` there is no quiet wrapper to resolve, so set
 `FS_CORE_ROOT` to a checkout that has one. `tier.sh` accepts a path relative
 to this repository, which is also the only spelling Git Bash can use on the
 Windows leg.

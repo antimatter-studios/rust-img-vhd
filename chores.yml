@@ -91,10 +91,10 @@ chore_min_version: 0.6.0
 #   resolver to that, including both refusals.
 #
 #   The wrapper ships in core from v0.2.11 and has been quiet on failure
-#   since v0.2.13, which is BELOW the v0.2.10 this crate compiles against
-#   (#96, #99). That is why .github/workflows/ci.yml checks core out twice
-#   and points FS_CORE_ROOT at the second one. On a machine whose
-#   ../rust-fs-core is held at v0.2.10 for the same reason, set FS_CORE_ROOT
+#   since v0.2.13, which is ABOVE the v0.2.12 this crate compiles against.
+#   That is why .github/workflows/ci.yml checks core out twice and points
+#   FS_CORE_ROOT at the second one. On a machine whose ../rust-fs-core is
+#   held at v0.2.12 for the same reason, set FS_CORE_ROOT
 #   to a checkout that has the script -- tier.sh takes a path relative to
 #   this repository.
 vars:

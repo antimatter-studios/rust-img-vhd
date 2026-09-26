@@ -35,18 +35,15 @@ jobs:
           path: rust-img-vhd
       # TWO CHECKOUTS OF CORE, BECAUSE THEY ARE TWO DIFFERENT PINS.
       #
-      # This one is the PATH DEPENDENCY the crate compiles against, and it
-      # cannot move. rust-fs-core#75 made a write past the end of a
-      # `FileDevice` a refusal, and appending a block is how this format
-      # allocates: measured on 2026-09-26, this crate's suite against core
-      # v0.2.11 and against v0.2.13 fails 7 tests in tests/synthetic.rs, every
-      # one of them a write landing exactly at the device's current end;
-      # against v0.2.10, none. See #96, #99 and rust-fs-core#147/#129.
+      # This one is the PATH DEPENDENCY the crate compiles against. v0.2.12
+      # is the first core with `BlockDevice::set_len`, which an allocation
+      # now calls before it writes past the device's end (#99); before it,
+      # rust-fs-core#75 refused that write and the pin was held at v0.2.10.
       - name: checkout am-fs-core (sibling path dep)
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.10
+          ref: v0.2.12
           path: rust-fs-core
       # And this one is the TOOLING pin. It carries scripts/output-budget.sh,
       # which scripts/tier.sh resolves, verifies by its --version and copies
@@ -56,8 +53,7 @@ jobs:
       # v0.2.11 first packaged the script and v0.2.13 is where a failing tier
       # became quiet, so this pin cannot go below v0.2.13.
       #
-      # The two collapse back into one the day #96/#99 let the dependency
-      # move forward.
+      # The two collapse back into one when the dependency reaches v0.2.13.
       - name: checkout am-fs-core (the output-budget wrapper)
         uses: actions/checkout@v4
         with:
@@ -206,18 +202,15 @@ jobs:
           path: rust-img-vhd
       # TWO CHECKOUTS OF CORE, BECAUSE THEY ARE TWO DIFFERENT PINS.
       #
-      # This one is the PATH DEPENDENCY the crate compiles against, and it
-      # cannot move. rust-fs-core#75 made a write past the end of a
-      # `FileDevice` a refusal, and appending a block is how this format
-      # allocates: measured on 2026-09-26, this crate's suite against core
-      # v0.2.11 and against v0.2.13 fails 7 tests in tests/synthetic.rs, every
-      # one of them a write landing exactly at the device's current end;
-      # against v0.2.10, none. See #96, #99 and rust-fs-core#147/#129.
+      # This one is the PATH DEPENDENCY the crate compiles against. v0.2.12
+      # is the first core with `BlockDevice::set_len`, which an allocation
+      # now calls before it writes past the device's end (#99); before it,
+      # rust-fs-core#75 refused that write and the pin was held at v0.2.10.
       - name: checkout am-fs-core (sibling path dep)
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.10
+          ref: v0.2.12
           path: rust-fs-core
       # And this one is the TOOLING pin. It carries scripts/output-budget.sh,
       # which scripts/tier.sh resolves, verifies by its --version and copies
@@ -227,8 +220,7 @@ jobs:
       # v0.2.11 first packaged the script and v0.2.13 is where a failing tier
       # became quiet, so this pin cannot go below v0.2.13.
       #
-      # The two collapse back into one the day #96/#99 let the dependency
-      # move forward.
+      # The two collapse back into one when the dependency reaches v0.2.13.
       - name: checkout am-fs-core (the output-budget wrapper)
         uses: actions/checkout@v4
         with:
@@ -290,18 +282,15 @@ jobs:
           path: rust-img-vhd
       # TWO CHECKOUTS OF CORE, BECAUSE THEY ARE TWO DIFFERENT PINS.
       #
-      # This one is the PATH DEPENDENCY the crate compiles against, and it
-      # cannot move. rust-fs-core#75 made a write past the end of a
-      # `FileDevice` a refusal, and appending a block is how this format
-      # allocates: measured on 2026-09-26, this crate's suite against core
-      # v0.2.11 and against v0.2.13 fails 7 tests in tests/synthetic.rs, every
-      # one of them a write landing exactly at the device's current end;
-      # against v0.2.10, none. See #96, #99 and rust-fs-core#147/#129.
+      # This one is the PATH DEPENDENCY the crate compiles against. v0.2.12
+      # is the first core with `BlockDevice::set_len`, which an allocation
+      # now calls before it writes past the device's end (#99); before it,
+      # rust-fs-core#75 refused that write and the pin was held at v0.2.10.
       - name: checkout am-fs-core (sibling path dep)
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.10
+          ref: v0.2.12
           path: rust-fs-core
       # And this one is the TOOLING pin. It carries scripts/output-budget.sh,
       # which scripts/tier.sh resolves, verifies by its --version and copies
@@ -311,8 +300,7 @@ jobs:
       # v0.2.11 first packaged the script and v0.2.13 is where a failing tier
       # became quiet, so this pin cannot go below v0.2.13.
       #
-      # The two collapse back into one the day #96/#99 let the dependency
-      # move forward.
+      # The two collapse back into one when the dependency reaches v0.2.13.
       - name: checkout am-fs-core (the output-budget wrapper)
         uses: actions/checkout@v4
         with:
