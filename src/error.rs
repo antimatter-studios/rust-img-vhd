@@ -3,7 +3,19 @@
 use std::fmt;
 use std::io;
 
+/// Everything that can go wrong reading or writing a VHD.
+///
+/// `#[non_exhaustive]`, SO THE NEXT VARIANT IS NOT A BREAKING CHANGE. A caller
+/// must carry a wildcard arm, and gains variants as this grows rather than
+/// failing to compile. Adding the attribute is itself breaking, which is why it
+/// lands in the 0.4.0 bump alongside `ReadOnly` gaining its payload rather than
+/// later as a patch: doing it later would repeat the problem it removes.
+///
+/// The sibling `rust-img-vhdx` did the same for the same reason
+/// (rust-img-vhdx#63), after three variants were added across one minor line
+/// and each was a break the changelog had to be corrected for.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Io(io::Error),
     /// File is missing the VHD footer or the cookie doesn't match.
