@@ -27,39 +27,31 @@ jobs:
     # FS_CORE_ROOT against: `${{ github.workspace }}` is a backslash path on
     # windows-latest, and Git Bash can neither test nor copy one.
     env:
-      FS_CORE_ROOT: ../rust-fs-core-budget
+      FS_CORE_ROOT: ../rust-fs-core
     steps:
       - name: checkout am-img-vhd
         uses: actions/checkout@v4
         with:
           path: rust-img-vhd
-      # TWO CHECKOUTS OF CORE, BECAUSE THEY ARE TWO DIFFERENT PINS.
+      # ONE CHECKOUT OF CORE, WHICH IS BOTH PINS AT ONCE NOW.
       #
-      # This one is the PATH DEPENDENCY the crate compiles against. v0.2.12
-      # is the first core with `BlockDevice::set_len`, which an allocation
-      # now calls before it writes past the device's end (#99); before it,
-      # rust-fs-core#75 refused that write and the pin was held at v0.2.10.
-      - name: checkout am-fs-core (sibling path dep)
-        uses: actions/checkout@v4
-        with:
-          repository: antimatter-studios/rust-fs-core
-          ref: v0.2.12
-          path: rust-fs-core
-      # And this one is the TOOLING pin. It carries scripts/output-budget.sh,
-      # which scripts/tier.sh resolves, verifies by its --version and copies
-      # for the length of a run; the wrapper is rust-fs-core's and is
-      # deliberately not committed here (rust-fs-core#153), so there is
-      # nothing local to fall back to and a job that runs the suite needs it.
-      # v0.2.11 first packaged the script and v0.2.13 is where a failing tier
-      # became quiet, so this pin cannot go below v0.2.13.
+      # It was two, for two reasons that wanted different versions. The PATH
+      # DEPENDENCY needed at least v0.2.12, the first core with
+      # `BlockDevice::set_len` that an allocation calls before writing past
+      # the device's end (#99). The TOOLING needed at least v0.2.13, because
+      # scripts/tier.sh resolves core's scripts/output-budget.sh
+      # (rust-fs-core#153 — deliberately not committed here) and v0.2.13 is
+      # where a failing tier stopped reading its log aloud.
       #
-      # The two collapse back into one when the dependency reaches v0.2.13.
-      - name: checkout am-fs-core (the output-budget wrapper)
+      # The dependency is on v0.2.13 now, so the lower bound is met by the
+      # higher pin and the second checkout has nothing left to do. The
+      # comment it carried said exactly this would happen.
+      - name: checkout am-fs-core (sibling path dep, and the output-budget wrapper)
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
           ref: v0.2.13
-          path: rust-fs-core-budget
+          path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -194,39 +186,31 @@ jobs:
     # FS_CORE_ROOT against: `${{ github.workspace }}` is a backslash path on
     # windows-latest, and Git Bash can neither test nor copy one.
     env:
-      FS_CORE_ROOT: ../rust-fs-core-budget
+      FS_CORE_ROOT: ../rust-fs-core
     steps:
       - name: checkout am-img-vhd
         uses: actions/checkout@v4
         with:
           path: rust-img-vhd
-      # TWO CHECKOUTS OF CORE, BECAUSE THEY ARE TWO DIFFERENT PINS.
+      # ONE CHECKOUT OF CORE, WHICH IS BOTH PINS AT ONCE NOW.
       #
-      # This one is the PATH DEPENDENCY the crate compiles against. v0.2.12
-      # is the first core with `BlockDevice::set_len`, which an allocation
-      # now calls before it writes past the device's end (#99); before it,
-      # rust-fs-core#75 refused that write and the pin was held at v0.2.10.
-      - name: checkout am-fs-core (sibling path dep)
-        uses: actions/checkout@v4
-        with:
-          repository: antimatter-studios/rust-fs-core
-          ref: v0.2.12
-          path: rust-fs-core
-      # And this one is the TOOLING pin. It carries scripts/output-budget.sh,
-      # which scripts/tier.sh resolves, verifies by its --version and copies
-      # for the length of a run; the wrapper is rust-fs-core's and is
-      # deliberately not committed here (rust-fs-core#153), so there is
-      # nothing local to fall back to and a job that runs the suite needs it.
-      # v0.2.11 first packaged the script and v0.2.13 is where a failing tier
-      # became quiet, so this pin cannot go below v0.2.13.
+      # It was two, for two reasons that wanted different versions. The PATH
+      # DEPENDENCY needed at least v0.2.12, the first core with
+      # `BlockDevice::set_len` that an allocation calls before writing past
+      # the device's end (#99). The TOOLING needed at least v0.2.13, because
+      # scripts/tier.sh resolves core's scripts/output-budget.sh
+      # (rust-fs-core#153 — deliberately not committed here) and v0.2.13 is
+      # where a failing tier stopped reading its log aloud.
       #
-      # The two collapse back into one when the dependency reaches v0.2.13.
-      - name: checkout am-fs-core (the output-budget wrapper)
+      # The dependency is on v0.2.13 now, so the lower bound is met by the
+      # higher pin and the second checkout has nothing left to do. The
+      # comment it carried said exactly this would happen.
+      - name: checkout am-fs-core (sibling path dep, and the output-budget wrapper)
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
           ref: v0.2.13
-          path: rust-fs-core-budget
+          path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -274,39 +258,31 @@ jobs:
     # FS_CORE_ROOT against: `${{ github.workspace }}` is a backslash path on
     # windows-latest, and Git Bash can neither test nor copy one.
     env:
-      FS_CORE_ROOT: ../rust-fs-core-budget
+      FS_CORE_ROOT: ../rust-fs-core
     steps:
       - name: checkout am-img-vhd
         uses: actions/checkout@v4
         with:
           path: rust-img-vhd
-      # TWO CHECKOUTS OF CORE, BECAUSE THEY ARE TWO DIFFERENT PINS.
+      # ONE CHECKOUT OF CORE, WHICH IS BOTH PINS AT ONCE NOW.
       #
-      # This one is the PATH DEPENDENCY the crate compiles against. v0.2.12
-      # is the first core with `BlockDevice::set_len`, which an allocation
-      # now calls before it writes past the device's end (#99); before it,
-      # rust-fs-core#75 refused that write and the pin was held at v0.2.10.
-      - name: checkout am-fs-core (sibling path dep)
-        uses: actions/checkout@v4
-        with:
-          repository: antimatter-studios/rust-fs-core
-          ref: v0.2.12
-          path: rust-fs-core
-      # And this one is the TOOLING pin. It carries scripts/output-budget.sh,
-      # which scripts/tier.sh resolves, verifies by its --version and copies
-      # for the length of a run; the wrapper is rust-fs-core's and is
-      # deliberately not committed here (rust-fs-core#153), so there is
-      # nothing local to fall back to and a job that runs the suite needs it.
-      # v0.2.11 first packaged the script and v0.2.13 is where a failing tier
-      # became quiet, so this pin cannot go below v0.2.13.
+      # It was two, for two reasons that wanted different versions. The PATH
+      # DEPENDENCY needed at least v0.2.12, the first core with
+      # `BlockDevice::set_len` that an allocation calls before writing past
+      # the device's end (#99). The TOOLING needed at least v0.2.13, because
+      # scripts/tier.sh resolves core's scripts/output-budget.sh
+      # (rust-fs-core#153 — deliberately not committed here) and v0.2.13 is
+      # where a failing tier stopped reading its log aloud.
       #
-      # The two collapse back into one when the dependency reaches v0.2.13.
-      - name: checkout am-fs-core (the output-budget wrapper)
+      # The dependency is on v0.2.13 now, so the lower bound is met by the
+      # higher pin and the second checkout has nothing left to do. The
+      # comment it carried said exactly this would happen.
+      - name: checkout am-fs-core (sibling path dep, and the output-budget wrapper)
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
           ref: v0.2.13
-          path: rust-fs-core-budget
+          path: rust-fs-core
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - uses: dtolnay/rust-toolchain@stable
