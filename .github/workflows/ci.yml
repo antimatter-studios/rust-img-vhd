@@ -345,15 +345,46 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: rust-img-vhd
+      # `cargo doc` RESOLVES THE PATH DEPENDENCY, even though `cargo fmt`
+      # does not -- so this job needs core checked out and did not before the
+      # docs step below was added. Same ref as every other job.
+      - uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          ref: v0.2.13
+          path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
           components: rustfmt
       - name: fmt --check
+        working-directory: rust-img-vhd
         run: cargo fmt --check
+      # THE PUBLIC DOCS BUILD, AND A BROKEN LINK IS AN ERROR.
+      #
+      # Nothing here built the docs, and `build`, `test` and `clippy` all
+      # ignore intra-doc links, so a link to a private item or to something
+      # renamed away was invisible to every gate. Found by running it by hand:
+      # five errors on `main`, including `<file>`/`<offset>`/`<len>` in
+      # `vhd_tool`'s usage block read as unclosed HTML tags.
+      #
+      # `-D warnings` specifically. rustdoc's default is to warn and carry on,
+      # which is how the page ships with the text un-linked and no failure
+      # anywhere -- and the errors mask each other, so the count grows as the
+      # first ones are fixed. The sibling rust-img-qcow2 reached eight this
+      # way (qcow2#105).
+      - name: cargo doc (public docs build, broken links are errors)
+        working-directory: rust-img-vhd
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps
       - name: the one required check stands for every job
+        working-directory: rust-img-vhd
         run: scripts/ci-gate.sh
       - name: the agent guide carries the shared block
+        working-directory: rust-img-vhd
         # AGENTS.md embeds agent-core, byte-identical with every sibling. This
         # runs the script directly rather than through `chore lint`, because
         # CI here does not install chore -- a guard wired only into a task

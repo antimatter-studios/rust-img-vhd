@@ -9,6 +9,34 @@ never does.
 
 ### Fixed
 
+- **The public docs build, and CI runs rustdoc.** Nothing here built the docs,
+  and `cargo build`, `cargo test` and `cargo clippy` all ignore intra-doc
+  links, so a link to a private item or to something renamed away was
+  invisible to every gate this repository has. Five errors on `main`, in three
+  shapes:
+
+  - `[layout_matches_the_published_specification]` in `src/format.rs` names a
+    `#[test]` inside `mod tests` — there is nothing for rustdoc to point at, so
+    it is named in prose instead. A link that resolves to nothing is worse than
+    no link: it promises documentation that is not there.
+  - a redundant explicit link target in `src/reader.rs`, where the shortcut
+    already resolved.
+  - `<file>`, `<offset>` and `<len>` in `src/bin/vhd_tool.rs`'s usage block,
+    read as unclosed HTML tags because an indented block is still Markdown.
+    Fenced as `text`, which is also what stops the placeholders being swallowed
+    on the rendered page.
+
+  The last three were behind the first two: rustdoc stops at the first
+  failing pass, so the count grows as the earlier errors are fixed. The
+  sibling `rust-img-qcow2` reached eight this way (qcow2#105) before anyone
+  looked.
+
+  The gate is in the `fmt` job with `RUSTDOCFLAGS: -D warnings` — rustdoc's
+  default is to warn and carry on, which is how a page ships with its links
+  dead and no failure anywhere. That job needed `../rust-fs-core` checked out
+  for the first time, because `cargo doc` resolves the path dependency even
+  though `cargo fmt` does not; its ref moves to v0.2.13 with the others.
+
 - **`tests/qemu_validation.rs` no longer reports a green `0 passed` under the
   cross-validation suite's name.** The file opens with
   `#![cfg(feature = "qemu-validation")]` and `Cargo.toml` had no `[[test]]`

@@ -35,9 +35,11 @@
 //! dynamic header's `BLOCK_SIZE` fails 17. Rewriting those fixtures to
 //! use the constants would take all three to zero.
 //!
-//! [`layout_matches_the_published_specification`] is the same idea
-//! written down once explicitly, so the intent survives someone tidying
-//! the fixtures.
+//! `layout_matches_the_published_specification` in this module's tests is
+//! the same idea written down once explicitly, so the intent survives
+//! someone tidying the fixtures. Named rather than linked: it is a `#[test]`
+//! inside `mod tests`, so there is nothing for rustdoc to point at, and a
+//! link that resolves to nothing promises documentation that is not there.
 
 /// The VHD format is defined in terms of 512-byte sectors throughout —
 /// BAT entries count them, block bitmaps have one bit per one, and the
