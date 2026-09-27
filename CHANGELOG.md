@@ -55,14 +55,17 @@ never does.
   and not on that one. The `qemu-validation` job lints it where it is built,
   which is the only place it is compiled with its bodies present.
 
+- `include/vhd.h` and `vhd_open_rw_on_device`'s docs no longer promise
+  `FS_CORE_READ_ONLY`. That function returns a pointer, and
+  `fs_core.h`'s only error channel for a constructor is
+  `fs_core_last_error_message()` (#69).
+
 ### Added
 
 - **`tests/feature_gated_targets.rs`**, so a feature-gated test target added
   later cannot reintroduce this, and an assertion in `tests/ci_profile.rs` that
   the `qemu-validation` job still lints the target — the entry and the clippy
   step are one change, and with the entry alone nothing would look at the file.
-
-### Added
 
 - **The footer, dynamic header and BAT parsers are fuzzed, on two tiers.**
   A VHD footer is 512 bytes of almost entirely attacker-controlled
@@ -89,6 +92,51 @@ never does.
   dynamic image made and written through `vhd_tool` byte for byte (#46).
 
 ### Changed
+
+- **`tests/changelog.rs`: the changelog's shape, checked rather than
+  remembered.** *(#107)* Ported from `rust-img-vhdx`, where it was written for
+  rust-img-vhdx#63 — a required public field added to a `pub struct` after a
+  release, with the pending release on course to be a patch. Six assertions:
+  the manifest version equals the newest released section, a released section
+  carrying a breaking note bumped the **minor**, each `## [...]` section uses a
+  `### Heading` at most once, every released section has a `[x.y.z]: <url>`
+  definition, the marker scan reads a break however it is spelled, and the
+  version parser reads a heading or skips it rather than guessing.
+
+  It found four defects here on its first run, all fixed in this change:
+  `[Unreleased]` carried `### Added` twice and `### Fixed` twice, `[0.2.0]`
+  carried `### Added` twice, and there was no `[0.3.5]` link definition, with
+  `[Unreleased]` still comparing `v0.3.4...HEAD`, so that heading rendered as
+  literal brackets. Entry count is unchanged at 24 — the sections were merged,
+  nothing was dropped.
+
+  This repository's own spelling is what caught a hole in the guard: it read
+  `body.contains("BREAKING")`, and `Error::ReadOnly` carries its cause is noted
+  here as `(breaking: …)`. The scan is case-insensitive now
+  (rust-img-vhdx#128), and without that fix it would have read this changelog
+  as carrying no breaking change at all.
+
+### Note on the next release
+
+**The pending release is 0.4.0, not 0.3.6.** `Error::ReadOnly` gained a payload
+(#75), so every `match` on it and every construction of it stops compiling —
+and this crate's own header says the minor is the compatibility boundary for a
+`0.x` crate. Measured against `v0.3.5`:
+
+```diff
+-    ReadOnly,
++    ReadOnly(&'static str),
+```
+
+`a_released_section_that_breaks_api_bumped_the_minor` fires when the section is
+cut, which is the moment it is actionable; until then `[Unreleased]` has no
+version to check against. This note is here so that moment does not depend on
+somebody remembering.
+
+Worth doing in the same bump, for the reason rust-img-vhdx#63 gives — adding it
+is itself breaking, so doing it later repeats the problem: `#[non_exhaustive]`
+on `Error`.
+
 
 - **`fuzz/Cargo.toml` follows this crate's `am-fs-core` pin, and a test says
   so.** *(rust-img-qcow2#118)* The fuzz crate is a separate package with its own
@@ -138,13 +186,6 @@ never does.
   anything up to 34,816 bytes creates 34,816 (1/4/17). The same applies to
   `vhd_create_fixed` and `vhd_tool create-fixed`. Check `virtual_size()`
   for the size created (#35, #36).
-
-### Fixed
-
-- `include/vhd.h` and `vhd_open_rw_on_device`'s docs no longer promise
-  `FS_CORE_READ_ONLY`. That function returns a pointer, and
-  `fs_core.h`'s only error channel for a constructor is
-  `fs_core_last_error_message()` (#69).
 
 ## [0.3.5] — 2026-09-06
 
@@ -220,15 +261,14 @@ never does.
 
 - Device-backed reader and the dynamic-VHD write path.
 
-### Added
-
 - Release-on-tag pipeline using trusted publishing, and CI (test, fmt, clippy).
 
 ### Changed
 
 - `am-fs-core` dependency moves to 0.2.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.1...v0.3.2
