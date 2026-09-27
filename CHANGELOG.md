@@ -7,6 +7,33 @@ never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`tests/qemu_validation.rs` no longer reports a green `0 passed` under the
+  cross-validation suite's name.** The file opens with
+  `#![cfg(feature = "qemu-validation")]` and `Cargo.toml` had no `[[test]]`
+  entry for it, so `cargo test --all-targets` built it with the feature OFF,
+  linked an empty binary, ran it, and printed `test result: ok. 0 passed` —
+  under the name of the crate's only independent oracle. `0 passed` and
+  `12 passed` read the same to anyone scanning, and an executed-test floor
+  cannot tell them apart either: it sums the counts and a zero adds nothing.
+
+  `required-features = ["qemu-validation"]` takes the target out of
+  `--all-targets`, so the line disappears rather than being falsely green.
+
+- **The cross-validation target is linted.** Because `--all-targets` compiled
+  it with the feature off, `cargo clippy --all-targets -- -D warnings` saw an
+  empty file: `-D warnings` was enforced on every other target in this crate
+  and not on that one. The `qemu-validation` job lints it where it is built,
+  which is the only place it is compiled with its bodies present.
+
+### Added
+
+- **`tests/feature_gated_targets.rs`**, so a feature-gated test target added
+  later cannot reintroduce this, and an assertion in `tests/ci_profile.rs` that
+  the `qemu-validation` job still lints the target — the entry and the clippy
+  step are one change, and with the entry alone nothing would look at the file.
+
 ### Changed
 
 - **`am-fs-core` moves to v0.2.13, and CI checks core out once instead of
