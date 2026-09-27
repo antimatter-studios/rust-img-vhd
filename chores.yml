@@ -4,7 +4,7 @@ chore_min_version: 0.6.0
 # THE CONTRACT THIS FILE EXISTS TO OWN.
 #
 # How to build rust-img-vhd is knowledge that belongs to rust-img-vhd. It used to live in
-# diskjockey/scripts/build-img-containers.sh, a 205-line script that knew the
+# a consumer's build script, a 205-line script that knew the
 # target triple, the cargo profile, the `[lib].name` of four crates and where
 # cargo puts things — none of which is a consumer's business.
 #
@@ -287,6 +287,7 @@ tasks:
     desc: Formatting and clippy, exactly as CI runs them
     cmds:
       - scripts/agents-core-check.sh
+      - tests/scripts/test-no-consumer-names.sh
       - cargo fmt --check
       - cargo clippy --locked --all-targets -- -D warnings
 

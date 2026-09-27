@@ -84,7 +84,7 @@ jobs:
         # nothing, a build that produced no test binaries, and a suite that
         # compiled itself away all report exactly the green a full run
         # reports -- and the empty run is also the one that fits its output
-        # budget best. See antimatter-studios/diskjockey#197. Measured on
+        # budget best, as a family-wide CI audit found. Measured on
         # 2026-09-17 from run 35176485318 (main, 2847b3a): 215 executed on
         # ubuntu-latest and macos-latest, 214 on windows-latest, over nine
         # binaries; this branch runs 254. The floor is 228, and it
@@ -390,6 +390,11 @@ jobs:
         # CI here does not install chore -- a guard wired only into a task
         # nothing runs is a guard that reports protection it is not providing.
         run: scripts/agents-core-check.sh
+      - name: no tracked file names a consuming application
+        working-directory: rust-img-vhd
+        # This crate is a standalone project (AGENTS.md, "Project rules").
+        # Run directly for the same reason as the step above (#110).
+        run: tests/scripts/test-no-consumer-names.sh
 
   # ONE CHECK GATES A MERGE, AND IT STANDS FOR EVERY JOB (#90).
   #

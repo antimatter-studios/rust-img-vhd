@@ -15,8 +15,8 @@
 # there fails when the two drift apart. Add a matrix leg, rename a job, or
 # split `test` in two, and the new check reports on every pull request while
 # the gate keeps asking for the old set — green, and gating less than it did
-# the day before. That is the "fake coverage" audit of
-# antimatter-studios/diskjockey#197, sections 1 and 7, and the sibling
+# the day before. That is the "fake coverage" finding of a family-wide CI
+# audit, and the sibling
 # `rust-img-qcow2` is what it looks like when it has already happened: a
 # sixth check, `test / i686-unknown-linux-gnu`, produced on every pull
 # request and required by nothing.
