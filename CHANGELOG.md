@@ -7,6 +7,17 @@ never does.
 
 ## [Unreleased]
 
+### Changed
+
+- **`am-fs-core` moves to v0.2.13, and CI checks core out once instead of
+  twice.** The pin was held at v0.2.12 — the first release with the
+  `BlockDevice::set_len` an allocation calls before it grows the image (#99)
+  — while `scripts/tier.sh` needed v0.2.13 for the output-budget wrapper,
+  where a failing tier stopped reading its log aloud. Two lower bounds meant
+  two checkouts of the same repository at two refs in every workflow. The
+  higher pin satisfies both, so there is one again, and `FS_CORE_ROOT` points
+  at the sibling the crate compiles against.
+
 ### Added
 
 - **The footer, dynamic header and BAT parsers are fuzzed, on two tiers.**

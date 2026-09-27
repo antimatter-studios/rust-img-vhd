@@ -38,7 +38,7 @@ qemu-validation = []
 # It says nothing about scripts/output-budget.sh, which is core's and is
 # resolved by scripts/tier.sh from a SEPARATE, newer checkout -- see
 # AGENTS.md, "The output budget comes from rust-fs-core".
-am-fs-core = { path = "../rust-fs-core", version = "0.2.12" }
+am-fs-core = { path = "../rust-fs-core", version = "0.2.13" }
 
 [dev-dependencies]
 # YAML parser for tests/ci_profile.rs, which reads .github/workflows/ci.yml

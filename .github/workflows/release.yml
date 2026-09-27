@@ -21,24 +21,19 @@ jobs:
     # output-budget wrapper. Relative to the repository, which is what
     # tier.sh resolves a relative FS_CORE_ROOT against.
     env:
-      FS_CORE_ROOT: ../rust-fs-core-budget
+      FS_CORE_ROOT: ../rust-fs-core
     steps:
       - uses: actions/checkout@v5
 
-      # THE COMPILE PIN. v0.2.12 is the first core with the `set_len` an
-      # allocation calls before it grows the image -- see the note in
-      # .github/workflows/ci.yml and #99 -- and it moves separately from the
-      # tooling pin below.
-      - name: clone am-fs-core sibling
+      # ONE PIN, WHICH USED TO BE TWO. The compile pin needed at least
+      # v0.2.12, the first core with the `set_len` an allocation calls before
+      # it grows the image (#99); the tooling pin needed at least v0.2.13,
+      # where a failing tier stopped reading its log aloud and which carries
+      # scripts/output-budget.sh (rust-fs-core#153 — not committed here).
+      # The dependency is on v0.2.13 now, so one checkout satisfies both.
+      - name: clone am-fs-core sibling (path dep, and the output-budget wrapper)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
-
-      # THE TOOLING PIN. scripts/output-budget.sh is rust-fs-core's, is not
-      # committed here (rust-fs-core#153), and ships from v0.2.11; v0.2.13 is
-      # where a failing tier became quiet.
-      - name: clone am-fs-core for the output-budget wrapper
-        shell: bash
-        run: git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core-budget
+        run: git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -71,7 +66,7 @@ jobs:
 
       - name: clone am-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.2.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -93,7 +88,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: clone am-fs-core sibling (path dep)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
