@@ -1,5 +1,11 @@
 //! CLI inspector for VHD images.
 //!
+//! FENCED AS `text`, NOT INDENTED. An indented block is still Markdown, so
+//! rustdoc reads `<file>`, `<offset>` and `<len>` as HTML tags and reports
+//! each one as unclosed -- and its default is to warn and carry on, so the
+//! page ships with the placeholders swallowed.
+//!
+//! ```text
 //! Usage:
 //!   vhd_tool info <file>
 //!   vhd_tool read <file> <offset> <len>     hex dump
@@ -7,6 +13,7 @@
 //!   vhd_tool create-dynamic <file> <size> [--block-size N]
 //!                                           fresh dynamic VHD (2 MiB blocks)
 //!   vhd_tool write <file> <offset> <input>  write <input>'s bytes at <offset>
+//! ```
 
 use std::process::ExitCode;
 use vhd::VhdReader;

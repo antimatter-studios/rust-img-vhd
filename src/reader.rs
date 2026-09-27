@@ -504,7 +504,7 @@ impl VhdReader {
     /// otherwise [`Error::Corrupt`] is returned.
     ///
     /// The image is created at
-    /// [`size_with_exact_geometry`](crate::footer_build::size_with_exact_geometry)
+    /// [`crate::footer_build::size_with_exact_geometry`]
     /// of the request: rounded up, as qemu-img does, so the footer's CHS
     /// geometry and `current_size` describe the same disk. Check
     /// [`VhdReader::virtual_size`] on the result for the size created.
