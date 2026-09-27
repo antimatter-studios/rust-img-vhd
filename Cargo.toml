@@ -67,3 +67,25 @@ panic = "unwind"
 [profile.dev]
 opt-level = 1
 panic = "unwind"
+
+# THE GATED TARGET IS TAKEN OUT OF `--all-targets`.
+#
+# tests/qemu_validation.rs opens with `#![cfg(feature = "qemu-validation")]`.
+# Without this entry `cargo test --all-targets` builds it with the feature
+# OFF, links an empty binary, runs it, and prints
+#
+#   Running tests/qemu_validation.rs
+#   test result: ok. 0 passed; 0 failed
+#
+# under the name of the crate's only independent oracle. `0 passed` and
+# `12 passed` read the same to anyone scanning, and an executed-test floor
+# cannot tell them apart either: it sums the counts and a zero adds nothing.
+#
+# `required-features` means the target is not built unless the feature is on,
+# so the line disappears rather than being falsely green. The qemu-validation
+# job names both halves already (`--features qemu-validation --test
+# qemu_validation`), so that job is unaffected.
+[[test]]
+name = "qemu_validation"
+path = "tests/qemu_validation.rs"
+required-features = ["qemu-validation"]
