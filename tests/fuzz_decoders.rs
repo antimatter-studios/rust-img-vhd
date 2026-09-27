@@ -428,3 +428,65 @@ fn the_gate_covers_every_explorer_target() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The fuzz crate is for THIS crate, which means the same core (qcow2#118)
+// ---------------------------------------------------------------------------
+
+/// `fuzz/Cargo.toml` AND `Cargo.toml` NAME ONE VERSION OF `am-fs-core`.
+///
+/// The fuzz crate is a separate package with its own manifest and lockfile, so
+/// nothing about bumping the parent's dependency points at the child's. Across
+/// the four image crates the two had drifted in four different ways — the
+/// parent at `0.2.13` and the children at `0.2.10` or `0.2.12` — while every
+/// `fuzz.yml` already checked core out at `v0.2.13`.
+///
+/// It was green the whole time, which is the problem: `version = "0.2.10"` is
+/// a caret requirement that `0.2.13` satisfies, the `path` source is what
+/// cargo really uses, and `cargo fuzz run` is not passed `--locked`, so the
+/// stale lockfile is rewritten in place. The day core reaches `0.3.0` the
+/// parent resolves and the fuzz crate does not, and the failure surfaces in a
+/// nightly cron naming a version requirement rather than the bump behind it.
+///
+/// A CONSTRAINT, NOT A LOCKFILE ENTRY. What is compared is the `version` field
+/// in the two manifests; the lockfiles follow from them, and `fuzz/Cargo.lock`
+/// is rewritten by any `cargo fuzz` invocation anyway.
+#[test]
+fn the_fuzz_crate_requires_the_same_core_as_this_one() {
+    fn core_requirement(manifest: &str, what: &str) -> String {
+        let table: toml::Table = std::fs::read_to_string(manifest)
+            .unwrap_or_else(|e| panic!("read {manifest}: {e}"))
+            .parse()
+            .unwrap_or_else(|e| panic!("{manifest} parses as TOML: {e}"));
+        let dependencies = table
+            .get("dependencies")
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| panic!("{what} has no [dependencies]"));
+        let entry = dependencies
+            .get("am-fs-core")
+            .unwrap_or_else(|| panic!("{what} does not depend on am-fs-core"));
+        entry
+            .get("version")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{what}'s am-fs-core entry has no `version` field. A bare \
+                     `path` dependency passes every check in this file while \
+                     saying nothing about which core it is for."
+                )
+            })
+            .to_owned()
+    }
+
+    let root = env!("CARGO_MANIFEST_DIR");
+    let parent = core_requirement(&format!("{root}/Cargo.toml"), "Cargo.toml");
+    let fuzz = core_requirement(&format!("{root}/fuzz/Cargo.toml"), "fuzz/Cargo.toml");
+
+    assert_eq!(
+        fuzz, parent,
+        "fuzz/Cargo.toml requires am-fs-core {fuzz:?} and Cargo.toml requires \
+         {parent:?}. Caret matching hides this until core's minor moves, and \
+         then it fails inside a nightly cron rather than in a pull request. \
+         Move both together, and refresh fuzz/Cargo.lock."
+    );
+}

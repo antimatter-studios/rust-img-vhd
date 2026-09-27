@@ -62,17 +62,6 @@ never does.
   the `qemu-validation` job still lints the target — the entry and the clippy
   step are one change, and with the entry alone nothing would look at the file.
 
-### Changed
-
-- **`am-fs-core` moves to v0.2.13, and CI checks core out once instead of
-  twice.** The pin was held at v0.2.12 — the first release with the
-  `BlockDevice::set_len` an allocation calls before it grows the image (#99)
-  — while `scripts/tier.sh` needed v0.2.13 for the output-budget wrapper,
-  where a failing tier stopped reading its log aloud. Two lower bounds meant
-  two checkouts of the same repository at two refs in every workflow. The
-  higher pin satisfies both, so there is one again, and `FS_CORE_ROOT` points
-  at the sibling the crate compiles against.
-
 ### Added
 
 - **The footer, dynamic header and BAT parsers are fuzzed, on two tiers.**
@@ -100,6 +89,37 @@ never does.
   dynamic image made and written through `vhd_tool` byte for byte (#46).
 
 ### Changed
+
+- **`fuzz/Cargo.toml` follows this crate's `am-fs-core` pin, and a test says
+  so.** *(rust-img-qcow2#118)* The fuzz crate is a separate package with its own
+  manifest and lockfile, so nothing about bumping the parent's dependency
+  pointed at the child's: this one required `0.2.12` while the crate required
+  `0.2.13`, and `fuzz.yml` already checked core out at `v0.2.13`.
+
+  It was green throughout, which is the problem. `version = "0.2.12"` is a caret
+  requirement that `0.2.13` satisfies, the `path` source is what cargo actually
+  uses, and `cargo fuzz run` is not passed `--locked`, so the stale
+  `fuzz/Cargo.lock` was rewritten in place on every run. The day core reaches
+  `0.3.0` the parent resolves and the fuzz crate does not — and that surfaces
+  in a nightly cron, naming a version requirement rather than the bump behind
+  it.
+
+  `the_fuzz_crate_requires_the_same_core_as_this_one` in
+  `tests/fuzz_decoders.rs` compares the two manifests' `version` fields. It
+  refuses a bare `path` dependency too, since one passes every other check in
+  that file while saying nothing about which core it is for. Both failure modes
+  were confirmed to fail before the fix went in.
+
+  All four image crates had drifted, in three different ways.
+
+- **`am-fs-core` moves to v0.2.13, and CI checks core out once instead of
+  twice.** The pin was held at v0.2.12 — the first release with the
+  `BlockDevice::set_len` an allocation calls before it grows the image (#99)
+  — while `scripts/tier.sh` needed v0.2.13 for the output-budget wrapper,
+  where a failing tier stopped reading its log aloud. Two lower bounds meant
+  two checkouts of the same repository at two refs in every workflow. The
+  higher pin satisfies both, so there is one again, and `FS_CORE_ROOT` points
+  at the sibling the crate compiles against.
 
 - **`Error::ReadOnly` carries its cause** (breaking: match `ReadOnly(_)`).
   One message used to cover three causes: the reader was opened
