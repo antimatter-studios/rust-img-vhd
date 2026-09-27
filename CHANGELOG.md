@@ -7,6 +7,8 @@ never does.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-27
+
 ### Fixed
 
 - **The public docs build, and CI runs rustdoc.** Nothing here built the docs,
@@ -93,6 +95,16 @@ never does.
 
 ### Changed
 
+- **`Error` is `#[non_exhaustive]`.** *(#107 — BREAKING: a caller matching on it
+  needs a wildcard arm.)* `Error::ReadOnly` gained a payload in #75 and that is
+  already a break; adding the attribute in the same bump means the *next*
+  variant is not. It is itself breaking, which is why it cannot wait — doing it
+  later as a patch would repeat the problem it removes. The sibling
+  `rust-img-vhdx` did the same for the same reason (rust-img-vhdx#63), after
+  three variants were added across one minor line and each had to be corrected
+  in the changelog afterwards.
+
+
 - **`tests/changelog.rs`: the changelog's shape, checked rather than
   remembered.** *(#107)* Ported from `rust-img-vhdx`, where it was written for
   rust-img-vhdx#63 — a required public field added to a `pub struct` after a
@@ -115,28 +127,6 @@ never does.
   here as `(breaking: …)`. The scan is case-insensitive now
   (rust-img-vhdx#128), and without that fix it would have read this changelog
   as carrying no breaking change at all.
-
-### Note on the next release
-
-**The pending release is 0.4.0, not 0.3.6.** `Error::ReadOnly` gained a payload
-(#75), so every `match` on it and every construction of it stops compiling —
-and this crate's own header says the minor is the compatibility boundary for a
-`0.x` crate. Measured against `v0.3.5`:
-
-```diff
--    ReadOnly,
-+    ReadOnly(&'static str),
-```
-
-`a_released_section_that_breaks_api_bumped_the_minor` fires when the section is
-cut, which is the moment it is actionable; until then `[Unreleased]` has no
-version to check against. This note is here so that moment does not depend on
-somebody remembering.
-
-Worth doing in the same bump, for the reason rust-img-vhdx#63 gives — adding it
-is itself breaking, so doing it later repeats the problem: `#[non_exhaustive]`
-on `Error`.
-
 
 - **`fuzz/Cargo.toml` follows this crate's `am-fs-core` pin, and a test says
   so.** *(rust-img-qcow2#118)* The fuzz crate is a separate package with its own
@@ -267,7 +257,8 @@ on `Error`.
 
 - `am-fs-core` dependency moves to 0.2.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.5...v0.4.0
 [0.3.5]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.2...v0.3.3
