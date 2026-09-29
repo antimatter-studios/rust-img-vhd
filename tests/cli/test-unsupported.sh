@@ -17,10 +17,7 @@ not_implemented() {
 
 not_implemented "resize" img.vhd disk.vhd resize 16M
 not_implemented "set" img.vhd disk.vhd set vhd.saved_state false
-not_implemented "write" img.vhd disk.vhd write --offset 0 </dev/null
-not_implemented "create" img.vhd new.vhd create 8M
 same "no refused verb changed the image" disk.vhd before.vhd
-check "the refused create made no file" test ! -e new.vhd
 
 # --text turns the error into a line for a person, with the same status.
 img.vhd disk.vhd resize 16M --text 2>resize.txt

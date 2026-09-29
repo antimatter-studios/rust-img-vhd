@@ -48,6 +48,16 @@ mkdir elsewhere
 (cd elsewhere && img.vhd ../child.vhd read >../from-elsewhere.raw)
 same "the parent is found beside the child" from-elsewhere.raw want.raw
 
+# A differencing image has no write path in the library: the verb exists,
+# answers `not implemented` with the library's reason, and changes nothing.
+cp child.vhd child.before
+printf 'x' | img.vhd child.vhd write --offset 0 >/dev/null 2>"$SANDBOX/diff-write.json"
+check "write to a differencing image exits 3" test "${PIPESTATUS[1]}" -eq 3
+jq_check "write to a differencing image says not implemented, and why" \
+    '(.error | startswith("not implemented")) and (.error | test("differencing")) and .code == 3' \
+    "$SANDBOX/diff-write.json"
+same "the refused write left the child as it was" child.vhd child.before
+
 # Without its parent the child cannot be read, and says so.
 mv parent.vhd parent.moved
 expect_error "a child whose parent is gone" 1 img.vhd child.vhd read

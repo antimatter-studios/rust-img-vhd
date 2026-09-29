@@ -371,7 +371,8 @@ jobs:
       # ignore intra-doc links, so a link to a private item or to something
       # renamed away was invisible to every gate. Found by running it by hand:
       # five errors on `main`, including `<file>`/`<offset>`/`<len>` in
-      # `vhd_tool`'s usage block read as unclosed HTML tags.
+      # the since-retired `vhd_tool`'s usage block, read as unclosed HTML
+      # tags.
       #
       # `-D warnings` specifically. rustdoc's default is to warn and carry on,
       # which is how the page ships with the text un-linked and no failure
@@ -443,14 +444,15 @@ jobs:
       - name: the staged tool first on PATH
         run: scripts/cli-install.sh --print-bin-dir >> "$GITHUB_PATH"
       - name: the cli tier (chore test:cli)
-        # Measured on 2026-09-29 on the Mac: 23 lines, 783 bytes, 134
-        # checks executed. The budget leaves room for the runner's longer
-        # paths, which appear in the doctor and PATH lines; the floor is
-        # about 95% of the count, and moves up with the suite.
+        # Measured on 2026-09-29 on the Mac: 29 lines, 947 bytes, 259
+        # checks executed (134 before write and create). The budget leaves
+        # room for the runner's longer paths, which appear in the doctor and
+        # PATH lines; the floor is about 95% of the count, and moves up with
+        # the suite.
         shell: bash
         run: |
           bash scripts/tier.sh "test (cli)" cli 40 1500 -- bash scripts/test-cli.sh
-          bash scripts/test-floor.sh cli 127
+          bash scripts/test-floor.sh cli 246
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4

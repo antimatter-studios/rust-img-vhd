@@ -41,13 +41,16 @@ chore cli:install                     # or: cargo build --release --features cli
 img.vhd disk.vhd info                 # JSON; --text for people
 img.vhd disk.vhd read -o disk.raw     # the whole virtual disk, as a raw image
 img.vhd disk.vhd read --offset 0 --length 512 | xxd
+img.vhd disk.vhd write --offset 0 < mbr.bin
+img.vhd new.vhd create 64M --type dynamic
 ```
 
 Metadata is JSON by default, led by the keys every `img.<fmt>` tool shares
 (`format`, `virtual_size`, `block_size`, `backing`, `dirty`) with the
 format's own under `vhd`. A failure is `{"error": "...", "code": N}` on
 stderr, `N` being the exit status: 1 failed, 2 wrong command line, 3 not
-implemented. `resize` and `set` exist and answer `not implemented`.
+implemented. `write` works on fixed and dynamic images; on a differencing
+one, like `resize` and `set` everywhere, it answers `not implemented`.
 
 `chore test:cli` tests the tool as installed, against `qemu-img`.
 
@@ -62,8 +65,6 @@ src/
   dynamic.rs      1024-byte dynamic header (cookie "cxsparse") + BAT walker
   reader.rs       VhdReader — open, open_rw, create_fixed, BlockRead/BlockDevice impls
   capi.rs         C ABI returning FsCoreDevice handles
-  bin/
-    vhd_tool.rs   CLI: info, read, create-fixed
   cli/            img.vhd / rust-img-vhd, behind the `cli` feature
 tests/
   synthetic.rs   hand-built fixtures: fixed, dynamic, differencing

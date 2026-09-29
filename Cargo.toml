@@ -16,10 +16,6 @@ exclude = ["fuzz"]
 name = "vhd"
 crate-type = ["staticlib", "rlib"]
 
-[[bin]]
-name = "vhd_tool"
-path = "src/bin/vhd_tool.rs"
-
 # THE COMMAND-LINE TOOL: one multi-call binary, named for the repository.
 # It dispatches on argv[0], so the release step installs it once as
 # `rust-img-vhd` and links `img.vhd` to it (cargo refuses a dot in a target
@@ -110,3 +106,11 @@ panic = "unwind"
 name = "qemu_validation"
 path = "tests/qemu_validation.rs"
 required-features = ["qemu-validation"]
+
+# The command-line tool's own write refusals, run against the built binary.
+# It needs the `rust-img-vhd` target, which needs `cli`; the debug and
+# release tiers pass `--features cli`, so they build and run it.
+[[test]]
+name = "cli_write"
+path = "tests/cli_write.rs"
+required-features = ["cli"]
