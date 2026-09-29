@@ -522,15 +522,10 @@ fn stdin_file() -> Option<std::fs::File> {
     file.metadata().ok().filter(|m| m.is_file()).map(|_| file)
 }
 
-#[cfg(windows)]
-fn stdin_file() -> Option<std::fs::File> {
-    use std::os::windows::io::AsHandle;
-    let handle = std::io::stdin().as_handle().try_clone_to_owned().ok()?;
-    let file = std::fs::File::from(handle);
-    file.metadata().ok().filter(|m| m.is_file()).map(|_| file)
-}
-
-#[cfg(not(any(unix, windows)))]
+/// Elsewhere stdin is always read as a pipe. Measured on Windows: a pipe's
+/// handle answers `metadata()` as a file of the bytes queued so far, so a
+/// pipe was taken for a file and its length checked before it was full.
+#[cfg(not(unix))]
 fn stdin_file() -> Option<std::fs::File> {
     None
 }
