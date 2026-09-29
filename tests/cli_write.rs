@@ -67,8 +67,10 @@ fn write_refuses_an_input_past_the_virtual_disk_by_its_length() {
         Some(1),
         "a 32 MiB input was accepted: {stderr}"
     );
+    // Off Unix stdin is always read as a pipe (see `stdin_file`), so the
+    // refusal there is the pipe's: the bytes on stdin outnumber the room.
     assert!(
-        stderr.contains("run past"),
+        stderr.contains("run past") || (cfg!(not(unix)) && stderr.contains("more than")),
         "refused, but not by its length: {stderr}"
     );
     assert!(
