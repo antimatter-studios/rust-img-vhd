@@ -652,6 +652,24 @@ impl VhdReader {
         &self.footer
     }
 
+    /// The footer's 512 bytes as the image was opened from them: the
+    /// trailing copy, or the mirror at offset 0 when the trailing one was
+    /// damaged (see [`VhdReader::footer_recovered_from_mirror`]).
+    ///
+    /// The fields [`Footer`] does not decode — the CHS geometry, the
+    /// creator, the timestamp, the saved-state flag — are read from here,
+    /// at the offsets in [`crate::format::footer_offsets`].
+    pub fn footer_bytes(&self) -> &[u8; FOOTER_SIZE] {
+        &self.footer_bytes
+    }
+
+    /// The dynamic header of a dynamic or differencing image: block size,
+    /// table size, and for a differencing image the parent's name and
+    /// unique id. `None` for a fixed image, which has none.
+    pub fn dynamic_header(&self) -> Option<&DynamicHeader> {
+        self.dynamic.as_ref()
+    }
+
     /// Read exactly `buf.len()` bytes starting at virtual `offset`.
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         let len = buf.len() as u64;

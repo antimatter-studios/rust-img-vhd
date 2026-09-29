@@ -59,6 +59,10 @@ chore_min_version: 0.6.0
 #                                              target nothing else builds --
 #                                              the feature gate keeps it out
 #                                              of `--all-targets`
+#     cli         23 /    783     40 /  1,500  the installed tool: one line
+#                                              per test file and its verdict,
+#                                              and doctor's report. Paths are
+#                                              longer on a runner
 #
 #   Raise one DELIBERATELY when a tier grows, the way the executed-test
 #   floors are raised -- and raise it in .github/workflows/ci.yml at the same
@@ -217,8 +221,13 @@ tasks:
       - task: test:debug
       - task: test:release
       - task: test:qemu
+      # The command-line tool, built and staged from this checkout, then
+      # tested as installed. A separate invocation because test:cli reads
+      # PATH, and the staged directory has to come first on it.
+      - task: cli:install
+      - 'PATH="$(scripts/cli-install.sh --print-bin-dir):$PATH" "{{.CHORE_EXE}}" test:cli'
       # THE LAST LINE: one number across the tiers, and where the detail is.
-      - bash scripts/test-verdict.sh debug release qemu
+      - bash scripts/test-verdict.sh debug release qemu cli
 
   test:debug:
     desc: 'The suite in the debug profile, where overflow checks are on'
@@ -229,7 +238,7 @@ tasks:
     # Do not add `--release` here; tests/ci_profile.rs refuses a
     # workflow with no such run, and the reason is the same one.
     cmds:
-      - 'EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets'
+      - 'EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets --features cli'
       - 'bash scripts/test-floor.sh debug 228'
 
   test:release:
@@ -239,7 +248,7 @@ tasks:
     # computation passes the debug run for the WRONG reason. See the note
     # on the `test-release` job in .github/workflows/ci.yml.
     cmds:
-      - 'bash scripts/tier.sh "test (release)" release 400 27000 -- cargo test --locked --release --all-targets'
+      - 'bash scripts/tier.sh "test (release)" release 400 27000 -- cargo test --locked --release --all-targets --features cli'
       - 'bash scripts/test-floor.sh release 228'
 
   test:qemu:
@@ -253,6 +262,31 @@ tasks:
     cmds:
       - 'bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation'
       - 'bash scripts/test-floor.sh qemu 10'
+
+  cli:install:
+    desc: 'Build the command-line tool (release, --features cli) and stage it as an install prefix: tmp/cli/bin/rust-img-vhd, and img.vhd a relative symlink to it'
+    # The layout an install has. It prints the PATH line; `test:cli` tests
+    # whatever PATH finds, so that directory goes first.
+    cmds: ['scripts/cli-install.sh']
+
+  test:cli:
+    desc: 'The command-line tool AS INSTALLED, found on PATH: doctor first, then every tests/cli/test-*.sh against qemu-img'
+    # Tests the installed artifact, not a cargo target: the same suite
+    # checks `chore cli:install`'s staging (`chore test` puts it first on
+    # PATH) and a Homebrew install. `rust-img-vhd doctor` runs before any
+    # tool is tested and fails the tier if a name is missing or shadowed,
+    # naming the fix; a missing qemu-img, qemu-io, jq or python3 fails it
+    # too. See scripts/test-cli.sh.
+    #
+    # BUDGET AND FLOOR, measured 2026-09-29 on the Mac: 23 lines, 783
+    # bytes, 134 checks executed (each file prints `test result: ok. N
+    # passed`, which test-floor.sh sums as it does cargo's). The budget
+    # leaves room for a runner's longer paths in the doctor and PATH lines;
+    # the floor is about 95% of the count. The `cli` job in ci.yml carries
+    # the same two numbers.
+    cmds:
+      - 'bash scripts/tier.sh "test (cli)" cli 40 1500 -- bash scripts/test-cli.sh'
+      - 'bash scripts/test-floor.sh cli 127'
 
   clean:
     desc: Remove this crate's cargo output
@@ -289,7 +323,7 @@ tasks:
       - scripts/agents-core-check.sh
       - tests/scripts/test-no-consumer-names.sh
       - cargo fmt --check
-      - cargo clippy --locked --all-targets -- -D warnings
+      - cargo clippy --locked --all-targets --features cli -- -D warnings
 
   check:ci-gate:
     desc: The one required check stands for every job in ci.yml
