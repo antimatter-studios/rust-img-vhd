@@ -9,6 +9,19 @@ never does.
 
 ### Added
 
+- **`img.vhd`, the command-line tool**, one multi-call binary named
+  `rust-img-vhd` behind a new `cli` feature (clap, MIT/Apache-2.0), so the
+  static library gains no dependency. `img.vhd <image> info`/`get [key]`
+  reports the image as JSON (`--text` for people), and `read [--offset N]
+  [--length N] [-o FILE]` streams the guest's raw bytes, the whole virtual
+  disk when no range is given. `resize` and `set` answer `not implemented`
+  (exit 3). `rust-img-vhd doctor` checks that the `img.vhd` on `PATH` is this
+  one. `chore test:cli` tests the installed tool against `qemu-img`, and CI
+  runs it on every pull request.
+- `VhdReader::footer_bytes` and `VhdReader::dynamic_header`, for the footer
+  fields `Footer` does not decode (geometry, creator, timestamp) and the
+  dynamic header of a dynamic or differencing image.
+
 - Releases carry a build-provenance attestation: the published `.crate` is
   attached to the GitHub release for its tag, checked first against the
   crates.io checksum, and verifiable with `gh attestation verify` (see the

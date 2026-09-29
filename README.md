@@ -27,6 +27,30 @@ C/C++/Go/Swift.
   - [ ] Differencing write path — still TODO. `write_at` on a
     differencing reader returns `Error::ReadOnly`.
 
+## Command line
+
+`img.vhd <image> <verb>` reports, reads and writes a VHD image without a
+hypervisor. It is one multi-call binary, `rust-img-vhd`, with `img.vhd` a
+link to it; `rust-img-vhd img ...` is the same program under the one name
+nothing else on `PATH` can shadow, and `rust-img-vhd doctor` says whether
+the `img.vhd` on `PATH` is this one. Build it with the `cli` feature (the
+library alone gains no dependency from it):
+
+```sh
+chore cli:install                     # or: cargo build --release --features cli
+img.vhd disk.vhd info                 # JSON; --text for people
+img.vhd disk.vhd read -o disk.raw     # the whole virtual disk, as a raw image
+img.vhd disk.vhd read --offset 0 --length 512 | xxd
+```
+
+Metadata is JSON by default, led by the keys every `img.<fmt>` tool shares
+(`format`, `virtual_size`, `block_size`, `backing`, `dirty`) with the
+format's own under `vhd`. A failure is `{"error": "...", "code": N}` on
+stderr, `N` being the exit status: 1 failed, 2 wrong command line, 3 not
+implemented. `resize` and `set` exist and answer `not implemented`.
+
+`chore test:cli` tests the tool as installed, against `qemu-img`.
+
 ## Layout
 
 ```
@@ -40,6 +64,7 @@ src/
   capi.rs         C ABI returning FsCoreDevice handles
   bin/
     vhd_tool.rs   CLI: info, read, create-fixed
+  cli/            img.vhd / rust-img-vhd, behind the `cli` feature
 tests/
   synthetic.rs   hand-built fixtures: fixed, dynamic, differencing
 include/
