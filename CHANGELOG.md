@@ -14,13 +14,26 @@ never does.
   static library gains no dependency. `img.vhd <image> info`/`get [key]`
   reports the image as JSON (`--text` for people), and `read [--offset N]
   [--length N] [-o FILE]` streams the guest's raw bytes, the whole virtual
-  disk when no range is given. `resize` and `set` answer `not implemented`
-  (exit 3). `rust-img-vhd doctor` checks that the `img.vhd` on `PATH` is this
+  disk when no range is given. `write --offset N` writes stdin into a fixed or
+  dynamic image, refusing input that would run past the end before writing
+  any of it; a differencing image answers `not implemented`. `create <size>
+  [--type fixed|dynamic] [--block-size N] [--force]` makes a new image,
+  rounded up to a whole CHS geometry as qemu-img rounds. `resize` and `set`
+  answer `not implemented` (exit 3). `rust-img-vhd doctor` checks that the `img.vhd` on `PATH` is this
   one. `chore test:cli` tests the installed tool against `qemu-img`, and CI
   runs it on every pull request.
 - `VhdReader::footer_bytes` and `VhdReader::dynamic_header`, for the footer
   fields `Footer` does not decode (geometry, creator, timestamp) and the
   dynamic header of a dynamic or differencing image.
+
+### Removed
+
+- **`vhd_tool` is removed; `img.vhd` replaces it** *(BREAKING for `cargo
+  install --bin vhd_tool`)*. `info` is `img.vhd <image> info`; the hex-dump
+  `read <file> <offset> <len>` is `img.vhd <image> read --offset N --length N
+  | xxd`; `create-fixed`/`create-dynamic` are `img.vhd <image> create <size>
+  --type fixed|dynamic`; `write <file> <offset> <input>` is `img.vhd <image>
+  write --offset N < input`. It was never in a release tarball or formula.
 
 - Releases carry a build-provenance attestation: the published `.crate` is
   attached to the GitHub release for its tag, checked first against the

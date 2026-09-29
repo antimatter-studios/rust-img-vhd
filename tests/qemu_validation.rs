@@ -332,51 +332,30 @@ fn qemu_extracts_bytes_from_vhd_we_created() {
 /// path -- BAT allocation, the sector bitmap, the footer mirror moving
 /// past each new block -- had only ever been read by this crate. Writes
 /// land in the first block, straddle a block boundary and hit a late
-/// block, so blocks are allocated out of order, and the image is made and
-/// written through `vhd_tool`, the surface the issue found missing.
+/// block, so blocks are allocated out of order.
+///
+/// The image was made and written through `vhd_tool` until that binary was
+/// retired for `img.vhd`; the command-line surface is cross-validated the
+/// same way, as installed, by `tests/cli/test-write.sh` in the `cli` tier.
+/// Here it goes through the library, which is what both tools call.
 #[test]
 fn qemu_reads_a_dynamic_vhd_we_created_and_wrote() {
     let vhd = vhd_path("dynamic-we-made");
     let raw = raw_path("dynamic-we-made");
-    let tool = env!("CARGO_BIN_EXE_vhd_tool");
     let block = 1u64 << 20;
 
-    let made = Command::new(tool)
-        .args([
-            "create-dynamic",
-            vhd.to_str().unwrap(),
-            "16777216",
-            "--block-size",
-        ])
-        .arg(block.to_string())
-        .output()
-        .unwrap();
-    assert!(
-        made.status.success(),
-        "{}",
-        String::from_utf8_lossy(&made.stderr)
-    );
-
+    let w = VhdReader::create_dynamic(&vhd, 16 << 20, block as u32).unwrap();
     let writes: [(u64, usize, u8); 3] = [
         (12 * block + 17, 3000, 0xC3),
         (block - 1000, 5000, 0xA5),
         (4096, 700, 0x5A),
     ];
-    for (i, (offset, len, fill)) in writes.iter().enumerate() {
-        let input = tmp("bin", &format!("dynamic-input-{i}"));
+    for (offset, len, fill) in writes.iter() {
         let bytes: Vec<u8> = (0..*len).map(|j| fill.wrapping_add(j as u8)).collect();
-        std::fs::write(&input, &bytes).unwrap();
-        let wrote = Command::new(tool)
-            .args(["write", vhd.to_str().unwrap(), &offset.to_string()])
-            .arg(input.as_os_str())
-            .output()
-            .unwrap();
-        assert!(
-            wrote.status.success(),
-            "{}",
-            String::from_utf8_lossy(&wrote.stderr)
-        );
+        w.write_at(*offset, &bytes).unwrap();
     }
+    w.flush_writes().unwrap();
+    drop(w);
 
     let r = VhdReader::open(&vhd).unwrap();
     assert_eq!(r.disk_type(), DiskType::Dynamic);

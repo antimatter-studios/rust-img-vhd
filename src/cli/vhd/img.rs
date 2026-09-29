@@ -10,10 +10,10 @@
 //! meaning something else.
 
 use std::ffi::OsString;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use clap::{value_parser, Arg, ArgMatches, Command as Cmd};
+use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 
 use crate::common::{CliError, Json, Outcome, Tool};
 use vhd::format::footer_offsets as at;
@@ -95,20 +95,51 @@ fn command() -> Cmd {
         )
         .subcommand(
             Cmd::new("write")
-                .about("Write the bytes on stdin into the guest at an offset (not implemented yet)")
+                .about("Write the bytes on stdin into the guest at an offset (fixed and dynamic images)")
                 .arg(byte_count("offset", "Where to write, in the guest").required(true))
                 .after_help(
-                    "Examples:\n  img.vhd disk.vhd write --offset 0 < mbr.bin\n\n\
-                     Answers `not implemented` (exit 3) until this tool's write verb lands.",
+                    "Examples:\n  img.vhd disk.vhd write --offset 0 < mbr.bin\n  \
+                     img.vhd src.vhd read | img.vhd dst.vhd write --offset 0\n  \
+                     printf 'hello' | img.vhd disk.vhd write --offset 1M\n\n\
+                     Input that would run past the end of the virtual disk is refused before \
+                     anything is written. A differencing image answers `not implemented` \
+                     (exit 3): the library has no write path for one yet.",
                 ),
         )
         .subcommand(
             Cmd::new("create")
-                .about("Create a new, empty image (not implemented yet)")
-                .arg(Arg::new("size").value_name("SIZE").required(true))
+                .about("Create a new, empty fixed or dynamic image")
+                .arg(
+                    Arg::new("size")
+                        .value_name("SIZE")
+                        .help("The virtual disk's size: bytes, or with K, M, G, T (a multiple of 512)")
+                        .value_parser(super::size::parse)
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("type")
+                        .long("type")
+                        .value_name("TYPE")
+                        .value_parser(["fixed", "dynamic"])
+                        .default_value("dynamic")
+                        .help("fixed: every byte allocated up front; dynamic: blocks allocated as written"),
+                )
+                .arg(byte_count(
+                    "block-size",
+                    "A dynamic image's block size, a power of two of at least 512 (default 2M)",
+                ))
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(ArgAction::SetTrue)
+                        .help("Replace IMAGE if it already exists"),
+                )
                 .after_help(
-                    "Examples:\n  img.vhd new.vhd create 64M\n\n\
-                     Answers `not implemented` (exit 3) until this tool's create verb lands.",
+                    "Examples:\n  img.vhd new.vhd create 64M\n  \
+                     img.vhd new.vhd create 1G --type fixed\n  \
+                     img.vhd new.vhd create 10G --block-size 512K\n\n\
+                     The size is rounded up to one the footer's CHS geometry describes, as \
+                     other VHD tools do; `virtual_size` in the report is the size created.",
                 ),
         )
         .subcommand(
@@ -176,12 +207,20 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             sub.get_one::<u64>("length").copied(),
             sub.get_one::<OsString>("output").map(PathBuf::from),
         ),
-        "write" => Err(CliError::not_implemented(
-            "write: this tool's write verb has not landed yet",
-        )),
-        "create" => Err(CliError::not_implemented(
-            "create: this tool's create verb has not landed yet",
-        )),
+        "write" => write(
+            image,
+            *sub.get_one::<u64>("offset")
+                .expect("clap requires the offset"),
+        ),
+        "create" => create(
+            image,
+            *sub.get_one::<u64>("size").expect("clap requires the size"),
+            sub.get_one::<String>("type")
+                .expect("clap defaults the type")
+                == "fixed",
+            sub.get_one::<u64>("block-size").copied(),
+            sub.get_flag("force"),
+        ),
         "set" => Err(CliError::not_implemented(
             "set: this library changes no footer or header field",
         )),
@@ -459,6 +498,212 @@ fn read(
         }
     }
     Ok(Outcome::done())
+}
+
+/// The default dynamic block size, the one Hyper-V and qemu-img use.
+const DEFAULT_BLOCK_SIZE: u64 = 2 * 1024 * 1024;
+
+/// What `write` reads its bytes from.
+enum Input {
+    /// A regular file redirected onto stdin: its length is known before a
+    /// byte is read, so the bounds are checked first and it is streamed.
+    File(std::fs::File, u64),
+    /// A pipe or a terminal: read whole, at most one byte more than fits,
+    /// so input that does not fit is refused before anything is written.
+    Buffered(Vec<u8>),
+}
+
+/// Stdin as a regular file, when it is one.
+#[cfg(unix)]
+fn stdin_file() -> Option<std::fs::File> {
+    use std::os::fd::AsFd;
+    let fd = std::io::stdin().as_fd().try_clone_to_owned().ok()?;
+    let file = std::fs::File::from(fd);
+    file.metadata().ok().filter(|m| m.is_file()).map(|_| file)
+}
+
+/// Elsewhere stdin is always read as a pipe. Measured on Windows: a pipe's
+/// handle answers `metadata()` as a file of the bytes queued so far, so a
+/// pipe was taken for a file and its length checked before it was full.
+#[cfg(not(unix))]
+fn stdin_file() -> Option<std::fs::File> {
+    None
+}
+
+/// Whether `input` is the file at `image`: an image written from itself
+/// grows as it is read, each block it allocates landing where the next
+/// read comes from.
+#[cfg(unix)]
+fn is_same_file(input: &std::fs::File, image: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (input.metadata(), std::fs::metadata(image)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_same_file(_input: &std::fs::File, _image: &Path) -> bool {
+    false
+}
+
+/// Write everything on stdin into the guest at `offset`.
+///
+/// Everything that can be refused is refused before the first byte is
+/// written: a differencing image, input that would run past the end of the
+/// virtual disk, and the image itself redirected onto stdin.
+fn write(image: &Path, offset: u64) -> Result<Outcome, CliError> {
+    let r = VhdReader::open_rw(image).map_err(|e| vhd_error(image, e))?;
+    if !r.writable() {
+        // The library says why; an empty write asks it without writing.
+        return Err(match r.write_at(0, &[]) {
+            Err(vhd::Error::ReadOnly(why)) => {
+                CliError::not_implemented(format!("write: {}: {why}", image.display()))
+            }
+            Err(e) => vhd_error(image, e),
+            Ok(()) => CliError::failed(format!("{}: not writable", image.display())),
+        });
+    }
+    let size = r.virtual_size();
+    if offset > size {
+        return Err(CliError::failed(format!(
+            "--offset {offset} is past the end of the {size}-byte virtual disk"
+        )));
+    }
+    let room = size - offset;
+    let too_long = |n: u64| {
+        CliError::failed(format!(
+            "{n} bytes at {offset} run past the end of the {size}-byte virtual disk"
+        ))
+    };
+    let stdin_error = |e: std::io::Error| CliError::failed(format!("read stdin: {e}"));
+    let input = match stdin_file() {
+        Some(mut file) => {
+            if is_same_file(&file, image) {
+                return Err(CliError::failed(format!(
+                    "{}: stdin is the image being written",
+                    image.display()
+                )));
+            }
+            let len = file.metadata().map_err(stdin_error)?.len();
+            let at = file.stream_position().map_err(stdin_error)?;
+            let n = len.saturating_sub(at);
+            if n > room {
+                return Err(too_long(n));
+            }
+            Input::File(file, n)
+        }
+        None => {
+            let mut data = Vec::new();
+            std::io::stdin()
+                .lock()
+                .take(room.saturating_add(1))
+                .read_to_end(&mut data)
+                .map_err(stdin_error)?;
+            if data.len() as u64 > room {
+                return Err(CliError::failed(format!(
+                    "stdin holds more than the {room} bytes from {offset} to the end of the \
+                     {size}-byte virtual disk"
+                )));
+            }
+            Input::Buffered(data)
+        }
+    };
+    let written = match input {
+        Input::Buffered(data) => {
+            for (i, chunk) in data.chunks(CHUNK).enumerate() {
+                r.write_at(offset + (i * CHUNK) as u64, chunk)
+                    .map_err(|e| vhd_error(image, e))?;
+            }
+            data.len() as u64
+        }
+        Input::File(file, n) => {
+            // No further than the length just checked, whatever the file
+            // does while it is read.
+            let mut file = file.take(n);
+            let mut buf = vec![0u8; CHUNK];
+            let mut at = offset;
+            loop {
+                let got = file.read(&mut buf).map_err(stdin_error)?;
+                if got == 0 {
+                    break;
+                }
+                r.write_at(at, &buf[..got])
+                    .map_err(|e| vhd_error(image, e))?;
+                at += got as u64;
+            }
+            at - offset
+        }
+    };
+    r.flush_writes().map_err(|e| vhd_error(image, e))?;
+    let report = Json::object([
+        ("offset", Json::from(offset)),
+        ("bytes", Json::from(written)),
+    ]);
+    Ok(Outcome::report(report).with_text(format!("wrote {written} bytes at {offset}")))
+}
+
+/// Create a new, empty image at `image` and report it.
+fn create(
+    image: &Path,
+    size: u64,
+    fixed: bool,
+    block_size: Option<u64>,
+    force: bool,
+) -> Result<Outcome, CliError> {
+    if size == 0 || !size.is_multiple_of(512) {
+        return Err(CliError::usage(format!(
+            "SIZE {size} is not a positive multiple of 512"
+        )));
+    }
+    if fixed && block_size.is_some() {
+        return Err(CliError::usage(
+            "--block-size is for a dynamic image; a fixed one has no blocks",
+        ));
+    }
+    let block_size = block_size.unwrap_or(DEFAULT_BLOCK_SIZE);
+    let block_size = u32::try_from(block_size)
+        .ok()
+        .filter(|b| b.is_power_of_two() && *b >= 512)
+        .ok_or_else(|| {
+            CliError::usage(format!(
+                "--block-size {block_size} is not a power of two from 512 to 2 GiB"
+            ))
+        })?;
+    let existed = image.exists();
+    if existed && !force {
+        return Err(CliError::failed(format!(
+            "{} already exists; pass --force to replace it",
+            image.display()
+        )));
+    }
+    let made = if fixed {
+        VhdReader::create_fixed(image, size)
+    } else {
+        VhdReader::create_dynamic(image, size, block_size)
+    };
+    let r = match made {
+        Ok(r) => r,
+        Err(e) => {
+            // Nothing half made is left behind where there was nothing.
+            if !existed {
+                let _ = std::fs::remove_file(image);
+            }
+            return Err(vhd_error(image, e));
+        }
+    };
+    let created = r.virtual_size();
+    let mut text = format!(
+        "created {} VHD {}: {created} bytes virtual",
+        disk_type_name(r.disk_type()),
+        image.display()
+    );
+    if created != size {
+        text.push_str(&format!(
+            " (asked for {size}; rounded up to a whole CHS geometry)"
+        ));
+    }
+    Ok(Outcome::report(envelope(&r)).with_text(text))
 }
 
 #[cfg(test)]

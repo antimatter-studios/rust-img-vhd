@@ -59,7 +59,7 @@ chore_min_version: 0.6.0
 #                                              target nothing else builds --
 #                                              the feature gate keeps it out
 #                                              of `--all-targets`
-#     cli         23 /    783     40 /  1,500  the installed tool: one line
+#     cli         29 /    947     40 /  1,500  the installed tool: one line
 #                                              per test file and its verdict,
 #                                              and doctor's report. Paths are
 #                                              longer on a runner
@@ -279,14 +279,15 @@ tasks:
     # too. See scripts/test-cli.sh.
     #
     # BUDGET AND FLOOR, measured 2026-09-29 on the Mac: 23 lines, 783
-    # bytes, 134 checks executed (each file prints `test result: ok. N
-    # passed`, which test-floor.sh sums as it does cargo's). The budget
-    # leaves room for a runner's longer paths in the doctor and PATH lines;
-    # the floor is about 95% of the count. The `cli` job in ci.yml carries
-    # the same two numbers.
+    # bytes, 134 checks executed when the tier was added with the read
+    # verbs; 29 lines, 947 bytes, 259 checks with write and create. (Each
+    # file prints `test result: ok. N passed`, which test-floor.sh sums as
+    # it does cargo's.) The budget leaves room for a runner's longer paths
+    # in the doctor and PATH lines; the floor is about 95% of the count.
+    # The `cli` job in ci.yml carries the same two numbers.
     cmds:
       - 'bash scripts/tier.sh "test (cli)" cli 40 1500 -- bash scripts/test-cli.sh'
-      - 'bash scripts/test-floor.sh cli 127'
+      - 'bash scripts/test-floor.sh cli 246'
 
   clean:
     desc: Remove this crate's cargo output
