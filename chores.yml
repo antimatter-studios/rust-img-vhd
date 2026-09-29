@@ -290,6 +290,25 @@ tasks:
       - 'bash scripts/tier.sh "test (cli)" cli 40 1500 -- bash scripts/test-cli.sh'
       - 'bash scripts/test-floor.sh cli 272'
 
+  package:cli:
+    desc: 'Build the tool and package it as this machine''s release tarball in tmp/package, checking its layout (what release.yml attaches)'
+    cmds:
+      - task: cli:install
+      - |
+        set -eu
+        case "$(uname -s)-$(uname -m)" in
+          Darwin-arm64) label=darwin-arm64 ;;
+          Linux-x86_64) label=linux-x86_64 ;;
+          *) echo "package:cli: no release target for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+        esac
+        version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+        mkdir -p tmp/package && cd tmp/package
+        bash ../../scripts/package-cli.sh "$version" "$label" ../../target/release
+
+  check:package-cli:
+    desc: 'scripts/package-cli.sh lays out the tarball, and refuses each way a build can be wrong'
+    cmds: ['bash tests/scripts/test-package-cli.sh']
+
   clean:
     desc: Remove this crate's cargo output
     cmds: ['cargo clean']
