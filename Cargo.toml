@@ -32,8 +32,9 @@ path = "src/cli/main.rs"
 required-features = ["cli"]
 
 [features]
-# The command-line tool and nothing else. clap is MIT/Apache-2.0.
-cli = ["dep:clap"]
+# The command-line tool and nothing else. clap, clap_complete and
+# clap_mangen are MIT/Apache-2.0.
+cli = ["dep:clap", "dep:clap_complete", "dep:clap_mangen"]
 # Enables the qemu-img cross-validation test binary. Off by default so
 # `cargo test` does not require qemu-img on PATH. CI installs qemu-utils
 # and runs `cargo test --features qemu-validation --test qemu_validation`
@@ -56,6 +57,12 @@ am-fs-core = { path = "../rust-fs-core", version = "0.2.13" }
 # `rust-img-vhd` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.
 clap = { version = "4.5", optional = true, default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
+# Shell completions and man pages, generated from the same clap command by
+# the binary itself (`rust-img-vhd generate ...`) when a release is
+# packaged, so the documentation cannot describe a flag the program does not
+# take. Both MIT/Apache-2.0, both behind `cli`.
+clap_complete = { version = "4.5", optional = true }
+clap_mangen = { version = "0.2", optional = true }
 
 [dev-dependencies]
 # YAML parser for tests/ci_profile.rs, which reads .github/workflows/ci.yml
