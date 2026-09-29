@@ -52,6 +52,8 @@ for oracle in qemu-img qemu-io; do
     command -v "$oracle" >/dev/null 2>&1 ||
         refuse "$oracle is not on PATH; it is the independent oracle every image is checked against. Install it: \`brew install qemu\`, or \`apt-get install qemu-utils\`."
 done
+command -v man >/dev/null 2>&1 ||
+    refuse "man is not on PATH; tests/cli/test-docs.sh asks it to find each installed page. Install it: \`apt-get install man-db\`."
 command -v python3 >/dev/null 2>&1 ||
     refuse "python3 is not on PATH; tests/cli/make-differencing.py builds the differencing image. Install it: \`brew install python\`, or \`apt-get install python3\`."
 

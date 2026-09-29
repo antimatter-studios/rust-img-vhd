@@ -59,7 +59,7 @@ chore_min_version: 0.6.0
 #                                              target nothing else builds --
 #                                              the feature gate keeps it out
 #                                              of `--all-targets`
-#     cli         29 /    947     40 /  1,500  the installed tool: one line
+#     cli         32 /  1,026     40 /  1,500  the installed tool: one line
 #                                              per test file and its verdict,
 #                                              and doctor's report. Paths are
 #                                              longer on a runner
@@ -275,19 +275,20 @@ tasks:
     # checks `chore cli:install`'s staging (`chore test` puts it first on
     # PATH) and a Homebrew install. `rust-img-vhd doctor` runs before any
     # tool is tested and fails the tier if a name is missing or shadowed,
-    # naming the fix; a missing qemu-img, qemu-io, jq or python3 fails it
+    # naming the fix; a missing qemu-img, qemu-io, jq, man or python3 fails it
     # too. See scripts/test-cli.sh.
     #
     # BUDGET AND FLOOR, measured 2026-09-29 on the Mac: 23 lines, 783
     # bytes, 134 checks executed when the tier was added with the read
-    # verbs; 29 lines, 947 bytes, 259 checks with write and create. (Each
+    # verbs; 29 lines, 947 bytes, 259 checks with write and create; 32
+    # lines, 1,026 bytes, 287 checks with the man pages and completions. (Each
     # file prints `test result: ok. N passed`, which test-floor.sh sums as
     # it does cargo's.) The budget leaves room for a runner's longer paths
     # in the doctor and PATH lines; the floor is about 95% of the count.
     # The `cli` job in ci.yml carries the same two numbers.
     cmds:
       - 'bash scripts/tier.sh "test (cli)" cli 40 1500 -- bash scripts/test-cli.sh'
-      - 'bash scripts/test-floor.sh cli 246'
+      - 'bash scripts/test-floor.sh cli 272'
 
   clean:
     desc: Remove this crate's cargo output

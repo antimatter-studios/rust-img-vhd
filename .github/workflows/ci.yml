@@ -431,8 +431,8 @@ jobs:
           repository: antimatter-studios/rust-fs-core
           ref: v0.2.13
           path: rust-fs-core
-      - name: install qemu-utils and jq
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq
+      - name: install qemu-utils, jq and man
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -444,15 +444,16 @@ jobs:
       - name: the staged tool first on PATH
         run: scripts/cli-install.sh --print-bin-dir >> "$GITHUB_PATH"
       - name: the cli tier (chore test:cli)
-        # Measured on 2026-09-29 on the Mac: 29 lines, 947 bytes, 259
-        # checks executed (134 before write and create). The budget leaves
+        # Measured on 2026-09-29 on the Mac: 32 lines, 1,026 bytes, 287
+        # checks executed (134 with the read verbs, 259 with write and
+        # create, then the man pages and completions). The budget leaves
         # room for the runner's longer paths, which appear in the doctor and
         # PATH lines; the floor is about 95% of the count, and moves up with
         # the suite.
         shell: bash
         run: |
           bash scripts/tier.sh "test (cli)" cli 40 1500 -- bash scripts/test-cli.sh
-          bash scripts/test-floor.sh cli 246
+          bash scripts/test-floor.sh cli 272
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4
