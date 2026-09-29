@@ -1,4 +1,5 @@
-//! The release workflow attests the crate it publishes.
+//! The release workflow attests the crate it publishes, and the
+//! command-line tarballs it attaches.
 //!
 //! A version on crates.io says nothing about where it was built: anyone
 //! holding a publish token could have uploaded it from their own machine.
@@ -12,6 +13,11 @@
 //! gh attestation verify <crate> --repo <owner>/<repo> \
 //!     --signer-workflow <owner>/<repo>/.github/workflows/release.yml
 //! ```
+//!
+//! The command-line tool's tarballs get the same treatment from the job
+//! that attaches them: built by the `package-cli` legs, downloaded,
+//! attested, then uploaded, so `gh attestation verify <tarball>` answers
+//! for them too.
 //!
 //! Nothing else notices if that step goes. The workflow runs only on a
 //! version tag, and a release without an attestation publishes exactly
@@ -38,6 +44,10 @@ const ATTEST: &str = "actions/attest-build-provenance@";
 /// The grants the attesting job needs, each at `write`: an OIDC token
 /// to sign with, the attestation store, and the release to attach to.
 const GRANTS: &[&str] = &["id-token", "attestations", "contents"];
+
+/// The action that hands the packaging legs' tarballs to the job that
+/// attests them, up to its `@`.
+const DOWNLOAD: &str = "actions/download-artifact@";
 
 fn load(yaml: &str) -> Yaml<'static> {
     let mut docs = Yaml::load_from_str(yaml).expect("the workflow parses as YAML");
@@ -117,6 +127,7 @@ fn attestation_gaps(yaml: &str) -> Vec<String> {
         .and_then(Yaml::as_mapping)
         .expect("the workflow has jobs");
     let mut attesting = 0;
+    let mut attesting_tarballs = 0;
     for (name, job) in jobs {
         let name = name.as_str().unwrap_or("?");
         let steps: Vec<&Yaml> = job
@@ -155,6 +166,35 @@ fn attestation_gaps(yaml: &str) -> Vec<String> {
             .and_then(|w| w.as_mapping_get("subject-path"))
             .and_then(Yaml::as_str)
             .unwrap_or("");
+        for grant in GRANTS {
+            if !granted.iter().any(|g| g == grant) {
+                gaps.push(format!("job {name} attests without {grant}: write"));
+            }
+        }
+        if subject.contains(".tar.gz") {
+            // The command-line tarballs: made by the packaging legs, which
+            // hold no grant, and handed to this job as artifacts.
+            attesting_tarballs += 1;
+            if !steps[..at].iter().any(|s| {
+                s.as_mapping_get("uses")
+                    .and_then(Yaml::as_str)
+                    .is_some_and(|u| u.starts_with(DOWNLOAD))
+            }) {
+                gaps.push(format!(
+                    "job {name} attests tarballs it did not download from the packaging legs"
+                ));
+            }
+            if !steps[at + 1..].iter().any(|s| {
+                invocations(s, "gh release upload")
+                    .iter()
+                    .any(|c| c.contains(".tar.gz"))
+            }) {
+                gaps.push(format!(
+                    "job {name} does not attach the attested tarballs to the GitHub release"
+                ));
+            }
+            continue;
+        }
         if !subject.contains(".crate") {
             gaps.push(format!(
                 "job {name} attests {subject:?}, not the packaged .crate"
@@ -178,14 +218,11 @@ fn attestation_gaps(yaml: &str) -> Vec<String> {
                 "job {name} does not attach the attested .crate to the GitHub release"
             ));
         }
-        for grant in GRANTS {
-            if !granted.iter().any(|g| g == grant) {
-                gaps.push(format!("job {name} attests without {grant}: write"));
-            }
-        }
     }
     if attesting == 0 {
         gaps.push(format!("no job in the workflow uses {ATTEST}<sha>"));
+    } else if attesting_tarballs == 0 {
+        gaps.push("no job attests the command-line tarballs (subject-path *.tar.gz)".to_owned());
     }
     gaps
 }
@@ -195,8 +232,8 @@ fn the_release_workflow_attests_the_crate_it_publishes() {
     let gaps = attestation_gaps(&workflow());
     assert!(
         gaps.is_empty(),
-        "{WORKFLOW} must attest the .crate it publishes, from the one job that \
-         publishes it, with only that job privileged: {gaps:#?}"
+        "{WORKFLOW} must attest the .crate it publishes and the tarballs it attaches, \
+         each from the job that attaches it, with only those jobs privileged: {gaps:#?}"
     );
 }
 
@@ -211,7 +248,11 @@ fn the_reader_discriminates() {
          \x20 publish:\n    permissions:\n      id-token: write\n      attestations: write\n      contents: write\n\
          \x20   steps:\n      - run: cargo package --no-verify\n      - run: cargo publish\n\
          \x20     - uses: {ATTEST}{sha} # v4.2.2\n        with:\n          subject-path: target/package/*.crate\n\
-         \x20     - run: gh release upload \"$GITHUB_REF_NAME\" target/package/*.crate --clobber\n"
+         \x20     - run: gh release upload \"$GITHUB_REF_NAME\" target/package/*.crate --clobber\n\
+         \x20 release-cli:\n    permissions:\n      id-token: write\n      attestations: write\n      contents: write\n\
+         \x20   steps:\n      - uses: {DOWNLOAD}{sha} # v4.3.0\n\
+         \x20     - uses: {ATTEST}{sha} # v4.2.2\n        with:\n          subject-path: dist/*.tar.gz\n\
+         \x20     - run: gh release upload \"$GITHUB_REF_NAME\" dist/*.tar.gz --clobber\n"
     );
     assert_eq!(attestation_gaps(&good), Vec::<String>::new(), "{good}");
 
@@ -223,7 +264,9 @@ fn the_reader_discriminates() {
         );
     };
     // The step gone entirely, or only named in a comment.
-    let no_step = good.replace(&format!("      - uses: {ATTEST}{sha} # v4.2.2\n        with:\n          subject-path: target/package/*.crate\n"), "      # uses: actions/attest-build-provenance\n");
+    let no_step = good
+        .replace(&format!("      - uses: {ATTEST}{sha} # v4.2.2\n        with:\n          subject-path: target/package/*.crate\n"), "      # uses: actions/attest-build-provenance\n")
+        .replace(&format!("      - uses: {ATTEST}{sha} # v4.2.2\n        with:\n          subject-path: dist/*.tar.gz\n"), "      # uses: actions/attest-build-provenance\n");
     expect(no_step, "no job in the workflow uses");
     // Pinned to a tag.
     expect(good.replace(sha, "v4.2.2"), "pin a full commit SHA");
@@ -281,5 +324,25 @@ fn the_reader_discriminates() {
     expect(
         good.replace("gh release upload", "echo gh-release-upload"),
         "does not attach the attested .crate",
+    );
+    // The tarballs: not attested at all, not downloaded, not attached.
+    expect(
+        good.replace(
+            "subject-path: dist/*.tar.gz",
+            "subject-path: target/package/*.crate",
+        )
+        .replace(
+            "gh release upload \"$GITHUB_REF_NAME\" dist/*.tar.gz",
+            "gh release upload \"$GITHUB_REF_NAME\" target/package/*.crate",
+        ),
+        "no job attests the command-line tarballs",
+    );
+    expect(
+        good.replace(&format!("      - uses: {DOWNLOAD}{sha} # v4.3.0\n"), ""),
+        "attests tarballs it did not download",
+    );
+    expect(
+        good.replace("dist/*.tar.gz --clobber", "--clobber"),
+        "does not attach the attested tarballs",
     );
 }

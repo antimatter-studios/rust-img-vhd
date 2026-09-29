@@ -101,6 +101,23 @@ The workflow refuses to attest a `.crate` whose sha256 differs from the
 checksum crates.io records for that version, so the file on the release
 page and the crates.io download are the same bytes.
 
+The command-line tool is attached to the same release as a tarball per
+platform, `am-img-vhd-X.Y.Z-darwin-arm64.tar.gz` and
+`am-img-vhd-X.Y.Z-linux-x86_64.tar.gz`, built by the same workflow and
+attested the same way:
+
+```sh
+gh attestation verify am-img-vhd-X.Y.Z-darwin-arm64.tar.gz \
+  --repo antimatter-studios/rust-img-vhd \
+  --signer-workflow antimatter-studios/rust-img-vhd/.github/workflows/release.yml
+```
+
+Each tarball is an install prefix, copied as it stands: `bin/rust-img-vhd`
+and `bin/img.vhd` (a relative symlink to it), the man pages and zsh, bash
+and fish completions under `share/`, `share/rust-img-vhd/CAVEATS` and
+`LICENSE`. `chore package:cli` builds this machine's tarball and checks the
+layout the way the release does.
+
 ## License
 
 MIT.

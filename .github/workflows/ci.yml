@@ -454,6 +454,23 @@ jobs:
         run: |
           bash scripts/tier.sh "test (cli)" cli 40 1500 -- bash scripts/test-cli.sh
           bash scripts/test-floor.sh cli 272
+      # THE RELEASE TARBALL, PUT TOGETHER ON EVERY PULL REQUEST, so a release
+      # is not the first time it is. scripts/package-cli.sh is what
+      # release.yml runs: it lays out the install prefix from the binary
+      # just built and checks the unpacked result -- every member, each
+      # dotted name a relative symlink to bin/rust-img-vhd, every man page
+      # and completion, CAVEATS at most four lines, every name's --version.
+      - name: the release tarball, built and its layout checked
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          mkdir -p tmp/package
+          cd tmp/package
+          bash ../../scripts/package-cli.sh "$version" linux-x86_64 ../../target/release
+      # And the packaging script refuses each way a build can be wrong.
+      - name: the packaging script refuses a wrong build
+        run: bash tests/scripts/test-package-cli.sh
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4

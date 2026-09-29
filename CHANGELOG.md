@@ -43,6 +43,12 @@ never does.
   attached to the GitHub release for its tag, checked first against the
   crates.io checksum, and verifiable with `gh attestation verify` (see the
   README, "Verifying a release").
+- Releases attach the command-line tool as a tarball per platform
+  (`darwin-arm64`, `linux-x86_64`), laid out as an install prefix
+  (`bin/rust-img-vhd`, `bin/img.vhd` linked to it, man pages and completions
+  under `share/`, `share/rust-img-vhd/CAVEATS`, `LICENSE`) and attested with
+  build provenance like the `.crate`. CI builds the tarball and checks its
+  layout on every pull request.
 
 ## [0.4.0] — 2026-09-27
 
