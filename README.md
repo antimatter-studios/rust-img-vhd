@@ -52,6 +52,26 @@ Microsoft's *Virtual Hard Disk Image Format Specification* (October
 2006). The format is small enough that a single annotated source file
 matches the spec sections one-to-one; see `footer.rs` and `dynamic.rs`.
 
+## Verifying a release
+
+From the next release onward, every version published to crates.io is
+also attached to the GitHub release for its tag, with a build-provenance
+attestation signed by this repository's release workflow. It proves the
+crate was built by `.github/workflows/release.yml` from a commit in this
+repository, not uploaded from someone's machine. To check the crates.io
+download of version `X.Y.Z`:
+
+```sh
+curl -sSfLo am-img-vhd-X.Y.Z.crate https://static.crates.io/crates/am-img-vhd/am-img-vhd-X.Y.Z.crate
+gh attestation verify am-img-vhd-X.Y.Z.crate \
+  --repo antimatter-studios/rust-img-vhd \
+  --signer-workflow antimatter-studios/rust-img-vhd/.github/workflows/release.yml
+```
+
+The workflow refuses to attest a `.crate` whose sha256 differs from the
+checksum crates.io records for that version, so the file on the release
+page and the crates.io download are the same bytes.
+
 ## License
 
 MIT.
