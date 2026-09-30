@@ -7,6 +7,18 @@ never does.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-09-30
+
+### Fixed
+
+- **The release packages the command-line tool on macOS.** 0.5.0's
+  `darwin-arm64` leg failed in `scripts/package-cli.sh`: macOS's `/bin/bash`
+  is 3.2, which ends a `$( )` at the first `)` of a bare `case` pattern, so
+  the check for members outside the install-prefix layout did not parse and
+  0.5.0 has no tarballs or GitHub release. Every pattern in that
+  substitution now opens with `(`, which every bash parses. 0.5.0 is on
+  crates.io; the library is unchanged.
+
 ## [0.5.0] — 2026-09-30
 
 ### Added
@@ -302,7 +314,8 @@ never does.
 
 - `am-fs-core` dependency moves to 0.2.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.5...v0.4.0
 [0.3.5]: https://github.com/antimatter-studios/rust-img-vhd/compare/v0.3.4...v0.3.5

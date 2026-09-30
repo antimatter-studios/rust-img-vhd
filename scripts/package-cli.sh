@@ -113,10 +113,12 @@ done
 # Files and links only: whether a tar lists directories varies by tar.
 extra="$(cd "$unpacked" && find . \( -type f -o -type l \) | sed 's|^\./||' | sort |
     while read -r member; do
-        case " ${want[*]} " in *" $member "*) continue ;; esac
+        # Each pattern opens with "(": bash 3.2, macOS's /bin/bash, ends the
+        # $( ) at a bare pattern's ")" and fails to parse the rest.
+        case " ${want[*]} " in (*" $member "*) continue ;; esac
         case "$member" in
-            share/man/man1/*.1) ;;
-            *) echo "$member" ;;
+            (share/man/man1/*.1) ;;
+            (*) echo "$member" ;;
         esac
     done)"
 [ -z "$extra" ] || die "$tarball holds members outside the layout: $(echo $extra)"
