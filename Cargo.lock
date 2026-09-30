@@ -4,7 +4,12 @@ version = 4
 
 [[package]]
 name = "am-fs-core"
-version = "0.2.13"
+version = "0.2.14"
+dependencies = [
+ "clap",
+ "clap_complete",
+ "clap_mangen",
+]
 
 [[package]]
 name = "am-img-vhd"
@@ -12,8 +17,6 @@ version = "0.5.1"
 dependencies = [
  "am-fs-core",
  "clap",
- "clap_complete",
- "clap_mangen",
  "saphyr",
  "serde_json",
  "toml",
