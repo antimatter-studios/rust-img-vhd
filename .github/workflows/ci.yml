@@ -406,6 +406,11 @@ jobs:
         # This crate is a standalone project (AGENTS.md, "Project rules").
         # Run directly for the same reason as the step above (#110).
         run: tests/scripts/test-no-consumer-names.sh
+      - name: a job holding a write token runs only pinned actions
+        # Named here because nothing runs tests/scripts by glob in this
+        # workflow: a guard only in that directory would never run.
+        working-directory: rust-img-vhd
+        run: bash tests/scripts/test-write-jobs-pinned.sh
 
   # THE COMMAND-LINE TOOL AS INSTALLED, found on PATH rather than as a
   # cargo target: `scripts/cli-install.sh` builds it in release mode and
