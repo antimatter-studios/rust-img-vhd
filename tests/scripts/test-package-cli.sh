@@ -98,7 +98,11 @@ if [ -f "$tarball" ]; then
     unpacked="$sandbox/unpacked"
     mkdir -p "$unpacked"
     tar -xzf "$tarball" -C "$unpacked"
-    members="$(cd "$unpacked" && find . \( -type f -o -type l \) | sed 's|^\./||' | sort | tr '\n' ' ')"
+    # LC_ALL=C because `want` below is written in byte order, LICENSE before
+    # bin/. A bare `sort` collates by the caller's locale, and en_GB/en_US
+    # put LICENSE after bin/, so the check failed on a correct tarball
+    # everywhere but a C-locale CI runner (#125).
+    members="$(cd "$unpacked" && find . \( -type f -o -type l \) | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ')"
     want="LICENSE bin/img.vhd bin/rust-img-vhd share/bash-completion/completions/img.vhd share/bash-completion/completions/rust-img-vhd share/fish/vendor_completions.d/img.vhd.fish share/fish/vendor_completions.d/rust-img-vhd.fish share/man/man1/img.vhd-read.1 share/man/man1/img.vhd.1 share/man/man1/rust-img-vhd.1 share/rust-img-vhd/CAVEATS share/zsh/site-functions/_img.vhd share/zsh/site-functions/_rust-img-vhd "
     [ "$members" = "$want" ] && ok || fail "the tarball holds exactly the prefix layout, got: $members"
     [ -L "$unpacked/bin/img.vhd" ] && [ "$(readlink "$unpacked/bin/img.vhd")" = rust-img-vhd ] && ok ||
