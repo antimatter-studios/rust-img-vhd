@@ -3,7 +3,7 @@
 # The house style: `ok`/`fail`, a `fails` counter, `set -uo pipefail` (not
 # -e, so later checks still run after one fails), a sandbox under the
 # repository's tmp/, and `finish` last, which prints the count
-# scripts/test-floor.sh reads and the trailing `<name>: all checks passed`
+# rust-fs-core's test-floor reads and the trailing `<name>: all checks passed`
 # line scripts/test-cli.sh requires.
 #
 # The tools are whatever PATH finds: scripts/test-cli.sh has already made

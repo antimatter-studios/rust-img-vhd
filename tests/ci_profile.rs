@@ -5313,20 +5313,28 @@ fn tier_invocation(words: &[String]) -> Option<(String, Budget)> {
     Some((log, Budget { lines, bytes }))
 }
 
-/// The tier a `scripts/test-floor.sh TIER FLOOR` command counts, and the
-/// floor it holds it to.
+/// The tier a `scripts/core.sh test-floor TIER FLOOR` command counts, and the
+/// floor it holds it to. The floor is rust-fs-core's family script; this
+/// repository runs it through its bootstrap and keeps no copy.
 fn floor_check(words: &[String]) -> Option<(String, u64)> {
-    let is_the_floor_script = |w: &&String| {
-        w.rsplit('/').next() == Some("test-floor.sh") && w.split('/').any(|part| part == "scripts")
+    let is_the_bootstrap = |w: &&String| {
+        w.rsplit('/').next() == Some("core.sh") && w.split('/').any(|part| part == "scripts")
     };
-    let at = words.iter().position(|w| is_the_floor_script(&w))?;
+    let at = words.iter().position(|w| is_the_bootstrap(&w))?;
     if !words[..at]
         .iter()
         .all(|w| w == "env" || w == "bash" || w == "sh")
     {
         return None;
     }
-    let rest = &words[at + 1..];
+    let mut rest = &words[at + 1..];
+    if rest.first().map(String::as_str) != Some("test-floor") {
+        return None;
+    }
+    rest = &rest[1..];
+    if rest.first().map(String::as_str) == Some("--refuse-ignored") {
+        rest = &rest[1..];
+    }
     Some((rest.first()?.clone(), rest.get(1)?.parse().ok()?))
 }
 
@@ -5595,7 +5603,7 @@ fn every_budgeted_test_tier_still_counts_what_ran() {
                  and never counts it. `cargo test` exits 0 having run nothing, \
                  so this job would report green on an empty selection -- and \
                  an empty run is the one that fits its output budget best. Add \
-                 `bash scripts/test-floor.sh {tier} N` after it, with N \
+                 `bash scripts/core.sh test-floor {tier} N` after it, with N \
                  MEASURED and roughly a tenth below what ran.",
                 job.name,
                 path.display()
@@ -5705,15 +5713,25 @@ mod output_budget_guard {
     #[test]
     fn a_floor_check_yields_its_tier_and_its_number() {
         assert_eq!(
-            floor_check(&words("bash scripts/test-floor.sh debug 210")),
+            floor_check(&words("bash scripts/core.sh test-floor debug 210")),
             Some(("debug".to_string(), 210))
         );
         assert_eq!(
-            floor_check(&words("echo scripts/test-floor.sh debug 210")),
+            floor_check(&words(
+                "bash scripts/core.sh test-floor --refuse-ignored debug 210"
+            )),
+            Some(("debug".to_string(), 210))
+        );
+        assert_eq!(
+            floor_check(&words("echo scripts/core.sh test-floor debug 210")),
             None
         );
         assert_eq!(
-            floor_check(&words("bash scripts/test-floor.sh debug")),
+            floor_check(&words("bash scripts/core.sh test-floor debug")),
+            None
+        );
+        assert_eq!(
+            floor_check(&words("bash scripts/core.sh semver-check")),
             None
         );
     }

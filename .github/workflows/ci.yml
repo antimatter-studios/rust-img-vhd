@@ -57,7 +57,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.14
+          ref: v0.2.16
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -110,7 +110,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets --features cli
-          bash scripts/test-floor.sh debug 228
+          bash scripts/core.sh test-floor debug 228
         env:
           EXPECT_OVERFLOW_CHECKS: "1"
       - name: keep the tier log
@@ -219,7 +219,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.14
+          ref: v0.2.16
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -244,7 +244,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh "test (release)" release 400 27000 -- cargo test --locked --release --all-targets --features cli
-          bash scripts/test-floor.sh release 228
+          bash scripts/core.sh test-floor release 228
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4
@@ -291,7 +291,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.14
+          ref: v0.2.16
           path: rust-fs-core
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -327,7 +327,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation
-          bash scripts/test-floor.sh qemu 10
+          bash scripts/core.sh test-floor qemu 10
       # LINTED WHERE IT IS BUILT, AND ONLY HERE CAN IT BE.
       #
       # `cargo clippy --all-targets` in the other jobs compiles this file with
@@ -363,7 +363,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.14
+          ref: v0.2.16
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -423,6 +423,13 @@ jobs:
           echo "ran $ran script tests, $failed failed (floor $floor)"
           [ "$failed" -eq 0 ] || exit 1
           [ "$ran" -ge "$floor" ] || { echo "::error::ran $ran script tests, floor is $floor"; exit 1; }
+      # The family scripts are rust-fs-core's alone: this fails if a copy of
+      # one is committed here, scripts/core.sh differs from core's, or
+      # anything here still calls a local copy.
+      - name: no copy of a rust-fs-core family script
+        working-directory: rust-img-vhd
+        shell: bash
+        run: bash scripts/core.sh family-check
 
   # THE COMMAND-LINE TOOL AS INSTALLED, found on PATH rather than as a
   # cargo target: `scripts/cli-install.sh` builds it in release mode and
@@ -453,7 +460,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.14
+          ref: v0.2.16
           path: rust-fs-core
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
@@ -477,7 +484,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh "test (cli)" cli 40 1500 -- bash scripts/test-cli.sh
-          bash scripts/test-floor.sh cli 272
+          bash scripts/core.sh test-floor cli 272
       # THE RELEASE TARBALL, PUT TOGETHER ON EVERY PULL REQUEST, so a release
       # is not the first time it is. scripts/package-cli.sh is what
       # release.yml runs: it lays out the install prefix from the binary
@@ -538,7 +545,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.14
+          ref: v0.2.16
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -552,7 +559,7 @@ jobs:
       - name: semver (quiet, budgeted)
         working-directory: rust-img-vhd
         shell: bash
-        run: bash scripts/tier.sh semver semver 40 4000 -- scripts/semver-check.sh
+        run: bash scripts/tier.sh semver semver 40 4000 -- bash scripts/core.sh semver-check
 
   ci-ok:
     name: ci-ok
