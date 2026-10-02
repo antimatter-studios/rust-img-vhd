@@ -54,7 +54,7 @@ qemu-validation = []
 # It says nothing about scripts/output-budget.sh, which is core's and is
 # resolved by scripts/tier.sh from a SEPARATE, newer checkout -- see
 # AGENTS.md, "The output budget comes from rust-fs-core".
-am-fs-core = { path = "../rust-fs-core", version = "0.2.16" }
+am-fs-core = { path = "../rust-fs-core", version = "0.2.18" }
 # The command-line tool's argument parser, behind the `cli` feature (see the
 # `rust-img-vhd` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.
