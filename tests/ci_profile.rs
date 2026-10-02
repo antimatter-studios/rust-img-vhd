@@ -5718,3 +5718,35 @@ mod output_budget_guard {
         );
     }
 }
+
+/// Every `tests/scripts/*.sh` guard runs in CI by glob, under a floor (#123).
+///
+/// They were named one step each, so a guard added to that directory never
+/// ran until someone also added a step for it, and a guard that never runs
+/// reads exactly like one that passes: test-write-jobs-pinned.sh went green
+/// on its first pull request without having run. The floor makes a glob that
+/// matched nothing a failure rather than a clean pass.
+#[test]
+fn every_script_test_runs_by_glob_under_a_floor() {
+    let ci = read_or_panic(&ci_yml());
+    assert!(
+        ci.contains("for t in tests/scripts/*.sh; do"),
+        "ci.yml runs no `for t in tests/scripts/*.sh` loop, so a guard added to \
+         tests/scripts/ is never run unless someone also names it here"
+    );
+    let floor: usize = ci
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("floor="))
+        .and_then(|n| n.trim().parse().ok())
+        .expect("the tests/scripts loop in ci.yml sets `floor=N`");
+    let present = std::fs::read_dir(manifest_dir().join("tests/scripts"))
+        .expect("tests/scripts exists")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "sh"))
+        .count();
+    assert!(
+        floor >= 1 && floor <= present,
+        "the tests/scripts floor in ci.yml is {floor}, with {present} guards present: \
+         it must be at least 1 and no more than the guards that exist"
+    );
+}
