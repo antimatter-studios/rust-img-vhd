@@ -42,7 +42,11 @@ fi
 # `test result: ok. 37 passed; 0 failed; ...`, one line per test binary.
 # `-a` because a test that prints a byte sequence cargo's log cannot decode
 # makes grep call the file binary and report nothing at all.
-ran="$(grep -aoE 'test result: ok\. [0-9]+ passed' "$LOG" | awk '{ sum += $4 } END { print sum + 0 }')"
+#
+# `|| true` because grep finding NOTHING exits 1, and under `pipefail` and
+# `-e` that ended this script at the assignment -- still failing, but
+# silently, in exactly the case it exists to name: zero tests ran (#128).
+ran="$({ grep -aoE 'test result: ok\. [0-9]+ passed' "$LOG" || true; } | awk '{ sum += $4 } END { print sum + 0 }')"
 if [ "$ran" -lt "$FLOOR" ]; then
     echo "::error::only $ran tests executed in the $TIER tier, floor is $FLOOR -- a run that executes fewer than that stopped early rather than passed"
     echo "test-floor.sh: the $TIER tier executed $ran tests; the floor is $FLOOR." >&2
