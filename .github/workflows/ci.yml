@@ -567,25 +567,19 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      # EVERY job in `needs`, read from `needs` itself. This step once
+      # echoed and looped over a hand-kept list that left out `semver`, so a
+      # public-API break failed its own job and ci-ok still went green. A
+      # job added to `needs:` is now judged without editing this step.
       - name: every gating job must have concluded success
+        env:
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          echo "test: ${{ needs.test.result }}"
-          echo "test-release: ${{ needs.test-release.result }}"
-          echo "qemu-validation: ${{ needs.qemu-validation.result }}"
-          echo "fmt: ${{ needs.fmt.result }}"
-          echo "cli: ${{ needs.cli.result }}"
-          failed=0
-          for one in "test:${{ needs.test.result }}" \
-                     "test-release:${{ needs.test-release.result }}" \
-                     "qemu-validation:${{ needs.qemu-validation.result }}" \
-                     "fmt:${{ needs.fmt.result }}" \
-                     "cli:${{ needs.cli.result }}"; do
-              job=${one%%:*}
-              result=${one#*:}
-              if [ "$result" != "success" ]; then
-                  echo "::error::$job concluded '$result', not 'success' -- failure, cancellation and skipping all mean the gate did not run to completion"
-                  failed=1
-              fi
-          done
-          [ "$failed" = 0 ] || exit 1
+          set -euo pipefail
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad="$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")')"
+          if [ -n "$bad" ]; then
+              echo "::error::not 'success': $bad -- failure, cancellation and skipping all mean the gate did not run to completion"
+              exit 1
+          fi
           echo "all gating jobs succeeded"
