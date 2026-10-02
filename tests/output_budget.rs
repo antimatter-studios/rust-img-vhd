@@ -559,32 +559,3 @@ fn no_copy_of_the_wrapper_is_committed_here() {
          script is missing something, change it THERE and raise the pin."
     );
 }
-
-/// A log with no `test result:` line at all -- a build that produced no test
-/// binary -- is the case scripts/test-floor.sh exists for, and it must say
-/// so. grep finding nothing exits 1, and under `set -euo pipefail` that used
-/// to end the script at its count: still status 1, but with no verdict and
-/// no `::error::` annotation naming the tier (#128).
-#[test]
-fn the_floor_names_a_tier_that_ran_zero_tests() {
-    let directory = repo().join("tmp").join("logs");
-    std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(
-        directory.join("floor-empty.log"),
-        "compiled; no test binary\n",
-    )
-    .unwrap();
-
-    let output = Command::new(bash())
-        .current_dir(repo())
-        .args(["scripts/test-floor.sh", "floor-empty", "1"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1), "{}", described(&output));
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("only 0 tests executed in the floor-empty tier, floor is 1"),
-        "the floor failed without naming the tier: {}",
-        described(&output)
-    );
-}

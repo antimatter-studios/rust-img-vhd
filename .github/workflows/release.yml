@@ -32,7 +32,7 @@ jobs:
       # The dependency is on v0.2.14 now, so one checkout satisfies both.
       - name: clone am-fs-core sibling (path dep, and the output-budget wrapper)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.16 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -65,7 +65,7 @@ jobs:
 
       - name: clone am-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.16 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -97,7 +97,7 @@ jobs:
           persist-credentials: false
       - name: clone am-fs-core sibling (path dep)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.16 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
         with:
           toolchain: 1.95.0
@@ -202,7 +202,7 @@ jobs:
           persist-credentials: false
       - name: clone am-fs-core sibling (path dep)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.16 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0

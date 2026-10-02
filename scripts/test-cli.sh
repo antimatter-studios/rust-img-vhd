@@ -24,7 +24,7 @@
 #
 # STEP 2: every tests/cli/test-*.sh, by glob, so a new one needs no edit
 # here. Each prints its failures, a `test result: ok. N passed; ...` line
-# (the count scripts/test-floor.sh reads, as it does cargo's), and LAST
+# (the count rust-fs-core's test-floor reads, as it does cargo's), and LAST
 # `<name>: all checks passed`. A file that exits 0 without that last line
 # stopped early and is a failure: `exit 0` part-way through is not evidence
 # a file finished.

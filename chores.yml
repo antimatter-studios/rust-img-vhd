@@ -239,7 +239,7 @@ tasks:
     # workflow with no such run, and the reason is the same one.
     cmds:
       - 'EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets --features cli'
-      - 'bash scripts/test-floor.sh debug 228'
+      - 'bash scripts/core.sh test-floor debug 228'
 
   test:release:
     desc: 'The suite in the profile that ships: no debug_assert!, arithmetic wraps'
@@ -249,7 +249,7 @@ tasks:
     # on the `test-release` job in .github/workflows/ci.yml.
     cmds:
       - 'bash scripts/tier.sh "test (release)" release 400 27000 -- cargo test --locked --release --all-targets --features cli'
-      - 'bash scripts/test-floor.sh release 228'
+      - 'bash scripts/core.sh test-floor release 228'
 
   test:qemu:
     desc: 'The qemu-img cross-validation: another implementation reads what we wrote'
@@ -261,7 +261,7 @@ tasks:
     # debug tier's own count would not move by one.
     cmds:
       - 'bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation'
-      - 'bash scripts/test-floor.sh qemu 10'
+      - 'bash scripts/core.sh test-floor qemu 10'
 
   cli:install:
     desc: 'Build the command-line tool (release, --features cli) and stage it as an install prefix: tmp/cli/bin/rust-img-vhd, and img.vhd a relative symlink to it'
@@ -288,7 +288,7 @@ tasks:
     # The `cli` job in ci.yml carries the same two numbers.
     cmds:
       - 'bash scripts/tier.sh "test (cli)" cli 40 1500 -- bash scripts/test-cli.sh'
-      - 'bash scripts/test-floor.sh cli 272'
+      - 'bash scripts/core.sh test-floor cli 272'
 
   package:cli:
     desc: 'Build the tool and package it as this machine''s release tarball in tmp/package, checking its layout (what release.yml attaches)'
@@ -360,7 +360,7 @@ tasks:
     # room for a warning block without hiding a flood. No floor: it is one
     # check, not a suite.
     cmds:
-      - 'bash scripts/tier.sh semver semver 40 4000 -- scripts/semver-check.sh'
+      - 'bash scripts/tier.sh semver semver 40 4000 -- bash scripts/core.sh semver-check'
 
   check:ci-gate:
     desc: The one required check stands for every job in ci.yml
