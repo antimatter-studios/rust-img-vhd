@@ -303,11 +303,7 @@ tasks:
         esac
         version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
         mkdir -p tmp/package && cd tmp/package
-        bash ../../scripts/package-cli.sh "$version" "$label" ../../target/release
-
-  check:package-cli:
-    desc: 'scripts/package-cli.sh lays out the tarball, and refuses each way a build can be wrong'
-    cmds: ['bash tests/scripts/test-package-cli.sh']
+        bash ../../scripts/core.sh package-cli "$version" "$label" ../../target/release
 
   clean:
     desc: Remove this crate's cargo output
