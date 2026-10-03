@@ -57,7 +57,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.18
+          ref: v0.2.23
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -219,7 +219,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.18
+          ref: v0.2.23
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -291,7 +291,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.18
+          ref: v0.2.23
           path: rust-fs-core
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -363,7 +363,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.18
+          ref: v0.2.23
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -419,7 +419,9 @@ jobs:
             bash "$t" || failed=$((failed + 1))
             ran=$((ran + 1))
           done
-          floor=3
+          # 2 since #134 deleted test-package-cli.sh with the script it
+          # tested: the packaging and its tests are rust-fs-core's now.
+          floor=2
           echo "ran $ran script tests, $failed failed (floor $floor)"
           [ "$failed" -eq 0 ] || exit 1
           [ "$ran" -ge "$floor" ] || { echo "::error::ran $ran script tests, floor is $floor"; exit 1; }
@@ -460,7 +462,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.18
+          ref: v0.2.23
           path: rust-fs-core
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
@@ -486,8 +488,10 @@ jobs:
           bash scripts/tier.sh "test (cli)" cli 40 1500 -- bash scripts/test-cli.sh
           bash scripts/core.sh test-floor cli 272
       # THE RELEASE TARBALL, PUT TOGETHER ON EVERY PULL REQUEST, so a release
-      # is not the first time it is. scripts/package-cli.sh is what
-      # release.yml runs: it lays out the install prefix from the binary
+      # is not the first time it is. rust-fs-core's package-cli (run as
+      # scripts/core.sh package-cli) is what release.yml reaches through
+      # core's release-cli workflow (#134): it lays out the install prefix
+      # Cargo.toml's [package.metadata.package-cli] declares from the binary
       # just built and checks the unpacked result -- every member, each
       # dotted name a relative symlink to bin/rust-img-vhd, every man page
       # and completion, CAVEATS at most four lines, every name's --version.
@@ -498,10 +502,7 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           mkdir -p tmp/package
           cd tmp/package
-          bash ../../scripts/package-cli.sh "$version" linux-x86_64 ../../target/release
-      # And the packaging script refuses each way a build can be wrong.
-      - name: the packaging script refuses a wrong build
-        run: bash tests/scripts/test-package-cli.sh
+          bash ../../scripts/core.sh package-cli "$version" linux-x86_64 ../../target/release
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4
@@ -545,7 +546,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.2.18
+          ref: v0.2.23
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:

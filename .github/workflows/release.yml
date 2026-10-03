@@ -32,7 +32,7 @@ jobs:
       # The dependency is on v0.2.14 now, so one checkout satisfies both.
       - name: clone am-fs-core sibling (path dep, and the output-budget wrapper)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -65,7 +65,7 @@ jobs:
 
       - name: clone am-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -97,7 +97,7 @@ jobs:
           persist-credentials: false
       - name: clone am-fs-core sibling (path dep)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
         with:
           toolchain: 1.95.0
@@ -170,117 +170,34 @@ jobs:
   # tag at the library's version: one tag, one version, one CHANGELOG, and
   # nothing to say which library a binary contains if the two could drift.
   #
-  # Native builds only, one runner per platform: cross-compiling Rust needs
-  # a cross toolchain or an emulator, and neither is worth it for two
-  # targets GitHub provides natively. READ-ONLY: a leg uploads its tarball
-  # as a workflow artifact, and `release-cli` attaches them together once
-  # every leg has passed, so a failed leg cannot leave a release with one
-  # platform on it.
+  # Packaged, attested and attached by rust-fs-core's release-cli workflow,
+  # the family's one copy (#134): a native leg per platform builds
+  # rust-img-vhd and runs `scripts/core.sh package-cli`, which stages the
+  # names Cargo.toml's [package.metadata.package-cli] declares and checks
+  # the tarball it built; then one `attach` job, the only one there with
+  # write grants, attests both tarballs and attaches them. After `publish`,
+  # so the GitHub release that job creates for the tag exists and the two
+  # never race to create it.
   #
-  # scripts/package-cli.sh lays the tarball out as an install prefix --
-  # bin/rust-img-vhd, bin/img.vhd a relative symlink to it, the generated
-  # man pages and completions under share/, share/rust-img-vhd/CAVEATS and
-  # LICENSE -- and checks the unpacked result: exactly that layout, and
-  # every name answering --version as this crate at this tag's version. The
-  # `cli` job in ci.yml runs the same script on every pull request, so this
-  # is not the first time the tarball is put together.
-  package-cli:
-    name: package the cli (${{ matrix.label }})
-    needs: [test, qemu-validation]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-latest
-            label: darwin-arm64
-          - runner: ubuntu-latest
-            label: linux-x86_64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-      - name: clone am-fs-core sibling (path dep)
-        shell: bash
-        run: git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
-      - name: build rust-img-vhd
-        shell: bash
-        run: cargo build --release --locked --features cli --bin rust-img-vhd
-      - name: package and check the tarball
-        id: pack
-        shell: bash
-        run: |
-          set -euo pipefail
-          tarball="$(scripts/package-cli.sh "${GITHUB_REF_NAME#v}" "${{ matrix.label }}")"
-          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
-          # A formula update is a copy of this, not a re-download and re-hash.
-          {
-            echo "### $tarball"
-            echo ""
-            echo '```'
-            echo "sha256 $(shasum -a 256 "$tarball" | cut -d' ' -f1)"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: keep the tarball for release-cli
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: cli-${{ matrix.label }}
-          path: ${{ steps.pack.outputs.tarball }}
-          if-no-files-found: error
-          retention-days: 7
-
-  # The one job that writes the tarballs to the release, after every leg
-  # passed and after `publish` has made the release for the tag. It checks
-  # nothing out and builds nothing: it downloads the legs' tarballs, signs a
-  # build-provenance attestation over them, and attaches them. An installer
-  # checks one with
+  # THE SIGNER MOVED. A Sigstore certificate names the workflow whose job
+  # signed, and for a called workflow that is the called file, not this
+  # one. The tarballs' attestations therefore name core's release-cli.yml
+  # (the .crate's, signed in `publish` above, still names this file), and
+  # an installer checks a download with
   #
   #   gh attestation verify <tarball> --repo antimatter-studios/rust-img-vhd \
-  #     --signer-workflow antimatter-studios/rust-img-vhd/.github/workflows/release.yml
+  #     --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml
   #
-  # tests/release_attestation.rs fails a workflow in which this job stops
-  # attesting what it attaches, or another job gains its grants.
-  release-cli:
-    name: attach the cli tarballs to the GitHub release
-    needs: [package-cli, publish]
-    runs-on: ubuntu-latest
+  # core-ref is the am-fs-core version Cargo.toml requires and toolchain is
+  # rust-toolchain.toml's channel; tests/release_attestation.rs fails when
+  # either disagrees, or when the call is not pinned by commit SHA.
+  cli:
+    needs: [test, qemu-validation, publish]
     permissions:
       contents: write
       id-token: write
       attestations: write
-    steps:
-      - name: collect every leg's tarball
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: cli-*
-          path: dist
-          merge-multiple: true
-      - name: one tarball per platform
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          assets=(dist/*.tar.gz)
-          if [ "${#assets[@]}" -ne 2 ]; then
-            echo "::error::expected 2 tarballs (one per package-cli leg), found ${#assets[@]}: ${assets[*]}"
-            exit 1
-          fi
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: dist/*.tar.gz
-      - name: attach the tarballs to the GitHub release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
-              --notes "See CHANGELOG.md. Every asset here carries a build-provenance attestation from this repository's release workflow."
-          fi
-          gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz --clobber
+    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@0f7714910080f5f2a080ed6032cccf19bc338064 # v0.2.23
+    with:
+      core-ref: v0.2.23
+      toolchain: 1.95.0

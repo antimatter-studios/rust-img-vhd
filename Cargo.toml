@@ -31,6 +31,16 @@ name = "rust-img-vhd"
 path = "src/cli/main.rs"
 required-features = ["cli"]
 
+# WHAT THE RELEASE TARBALL SHIPS, read by rust-fs-core's package-cli.sh
+# (`scripts/core.sh package-cli`), which release.yml reaches through core's
+# release-cli workflow and ci.yml's `cli` job runs on every pull request.
+# img.vhd is a relative symlink to bin/rust-img-vhd, with its man page in
+# section 1; the binary's own `generate names` must list exactly these, or
+# the packaging fails. CAVEATS is the default, packaging/CAVEATS.
+[package.metadata.package-cli]
+names = { "img.vhd" = 1 }
+licenses = ["LICENSE"]
+
 [features]
 # The command-line tool and nothing else. The plumbing it shares with the
 # family's other tools -- dispatch, --version, doctor, the output contract,
@@ -54,7 +64,11 @@ qemu-validation = []
 # It says nothing about scripts/output-budget.sh, which is core's and is
 # resolved by scripts/tier.sh from a SEPARATE, newer checkout -- see
 # AGENTS.md, "The output budget comes from rust-fs-core".
-am-fs-core = { path = "../rust-fs-core", version = "0.2.18" }
+#
+# 0.2.23 is the first release with scripts/package-cli.sh and the
+# release-cli workflow release.yml calls (#134): the tarball's packaging is
+# core's now, and the path sibling must carry it.
+am-fs-core = { path = "../rust-fs-core", version = "0.2.23" }
 # The command-line tool's argument parser, behind the `cli` feature (see the
 # `rust-img-vhd` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.
