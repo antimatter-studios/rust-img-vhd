@@ -213,34 +213,13 @@ guard at once.
 
 ## The output budget comes from rust-fs-core
 
-`scripts/tier.sh` runs every tier through rust-fs-core's
-`scripts/output-budget.sh`, and **there is no copy of that script in this
-repository**. `tier.sh` resolves it when a tier starts: `$FS_CORE_ROOT`
-first, then the `../rust-fs-core` sibling, then whatever `cargo metadata`
-says the `rust-fs-core` package root is. It verifies whichever it found by
-running it with `--version` and requiring exactly
-`rust-fs-core-output-budget 1`, copies it to `tmp/output-budget.$$.sh` for the
-length of the run, and removes it on exit.
-
-Every one of those steps FAILS LOUDLY rather than falling back: an absent core
-stops the run, and so does a present-but-wrong one. The contract is the
-`--version` string and **not** a SHA-256 the way `rust-fs-ntfs` pins one — a
-digest in every consumer is the lockstep this arrangement exists to remove.
-See rust-fs-core#153, and `tests/output_budget.rs`, which is now a test of the
-resolver rather than of a vendored copy.
-
-**Two pins, and here they disagree.** The wrapper ships in core from `v0.2.11`
-and has been quiet on failure since `v0.2.13` — above the `v0.2.12` this
-crate compiles against. So the workflows check core out **twice**, at
-`v0.2.12` for the path dependency and at `v0.2.13` for the wrapper, and point
-`FS_CORE_ROOT` at the second. They collapse into one checkout when the
-dependency reaches `v0.2.13`.
-
-The same applies to the throwaway worktree that section recommends: with
-`../rust-fs-core` held at `v0.2.12` there is no quiet wrapper to resolve, so set
-`FS_CORE_ROOT` to a checkout that has one. `tier.sh` accepts a path relative
-to this repository, which is also the only spelling Git Bash can use on the
-Windows leg.
+Every tier runs through rust-fs-core's `scripts/tier.sh`, **run in place**
+from the `../rust-fs-core` checkout at the version this repository pins:
+`bash ../rust-fs-core/scripts/tier.sh LABEL LOG LINES BYTES -- COMMAND`.
+There is no copy of it, of `scripts/output-budget.sh`, or of any other family
+script in this repository, and rust-fs-core's `family-check` (run in CI)
+refuses one. Bumping the pinned core version is how the scripts are upgraded;
+nothing is recopied. See rust-fs-core#153 and #212.
 
 **The verbose variable is `OUTPUT_BUDGET_VERBOSE`.** It was `FLTH_VERBOSE`
 while the script was vendored, and core's does not read the old name: setting

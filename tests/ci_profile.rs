@@ -819,15 +819,15 @@ fn scan_shell(line: &str) -> ShellScan {
     }
 }
 
-/// The command `scripts/tier.sh` was asked to run, or `words` unchanged.
+/// The command `../rust-fs-core/scripts/tier.sh` was asked to run, or `words` unchanged.
 ///
 /// # WHY A WRAPPER IS RECOGNISED HERE AND NOWHERE ELSE
 ///
-/// Every test run in `ci.yml` now goes through `scripts/tier.sh`, which
+/// Every test run in `ci.yml` now goes through `../rust-fs-core/scripts/tier.sh`, which
 /// runs it quietly under an output budget:
 ///
 /// ```text
-/// bash scripts/tier.sh "test (debug)" debug 360 24000 -- cargo test --locked --all-targets
+/// bash ../rust-fs-core/scripts/tier.sh "test (debug)" debug 360 24000 -- cargo test --locked --all-targets
 /// ```
 ///
 /// That is still a `cargo test`, and every assertion in this file has
@@ -859,7 +859,7 @@ fn without_the_tier_wrapper(words: &[String]) -> &[String] {
         return words;
     };
     // Anything in front of it must be an interpreter or an environment
-    // assignment; `sudo scripts/tier.sh` or `echo scripts/tier.sh` is
+    // assignment; `sudo ../rust-fs-core/scripts/tier.sh` or `echo ../rust-fs-core/scripts/tier.sh` is
     // not a tier invocation and is not unwrapped.
     let leading_is_harmless = words[..at].iter().all(|w| {
         w == "env" || w == "bash" || w == "sh" || (!w.starts_with('-') && w.contains('='))
@@ -894,7 +894,7 @@ fn without_the_tier_wrapper(words: &[String]) -> &[String] {
 /// script -- is not recognised and the command does not count, which is
 /// the strict direction.
 ///
-/// `scripts/tier.sh` IS THE ONE EXCEPTION, and it is named rather than
+/// `../rust-fs-core/scripts/tier.sh` IS THE ONE EXCEPTION, and it is named rather than
 /// inferred: see [`without_the_tier_wrapper`].
 fn cargo_test_arguments(words: &[String]) -> Option<Vec<&str>> {
     cargo_subcommand_arguments(words, "test")
@@ -5248,7 +5248,7 @@ jobs:
 // this constellation: 4,661M cache-read tokens against 9.5M of output, with
 // command output the largest single contributor a repository controls.
 //
-// So every test run in `ci.yml` goes through `scripts/tier.sh`, which writes
+// So every test run in `ci.yml` goes through `../rust-fs-core/scripts/tier.sh`, which writes
 // the whole run to `tmp/logs/<tier>.log`, prints one verdict line, prints the
 // TAIL when the run fails, and fails a run that passed while printing more
 // than its measured budget (exit 65, told apart from a red suite by its
@@ -5276,7 +5276,7 @@ fn chores_yml() -> PathBuf {
     manifest_dir().join("chores.yml")
 }
 
-/// A tier's output budget: the two numbers `scripts/tier.sh` passes on to
+/// A tier's output budget: the two numbers `../rust-fs-core/scripts/tier.sh` passes on to
 /// `output-budget.sh`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Budget {
@@ -5285,10 +5285,10 @@ struct Budget {
 }
 
 /// The tier a command runs and the budget it runs it under, for
-/// `[env|bash] scripts/tier.sh LABEL LOG MAX-LINES MAX-BYTES -- COMMAND...`.
+/// `[env|bash] ../rust-fs-core/scripts/tier.sh LABEL LOG MAX-LINES MAX-BYTES -- COMMAND...`.
 ///
 /// `None` for anything else, INCLUDING a malformed tier invocation: the
-/// numbers are read with `parse`, so `scripts/tier.sh t log a b -- ...`
+/// numbers are read with `parse`, so `../rust-fs-core/scripts/tier.sh t log a b -- ...`
 /// is not a budget this file will vouch for. `tier.sh` itself exits 2 on
 /// a short argument list, so the two agree about what counts.
 fn tier_invocation(words: &[String]) -> Option<(String, Budget)> {
@@ -5313,14 +5313,15 @@ fn tier_invocation(words: &[String]) -> Option<(String, Budget)> {
     Some((log, Budget { lines, bytes }))
 }
 
-/// The tier a `scripts/core.sh test-floor TIER FLOOR` command counts, and the
-/// floor it holds it to. The floor is rust-fs-core's family script; this
-/// repository runs it through its bootstrap and keeps no copy.
+/// The tier a `../rust-fs-core/scripts/test-floor.sh TIER FLOOR` command
+/// counts, and the floor it holds it to. The floor is rust-fs-core's family
+/// script, run in place from the checkout beside this one; no copy is kept.
 fn floor_check(words: &[String]) -> Option<(String, u64)> {
-    let is_the_bootstrap = |w: &&String| {
-        w.rsplit('/').next() == Some("core.sh") && w.split('/').any(|part| part == "scripts")
+    let is_the_floor = |w: &&String| {
+        w.rsplit('/').next() == Some("test-floor.sh")
+            && w.split('/').any(|part| part == "rust-fs-core")
     };
-    let at = words.iter().position(|w| is_the_bootstrap(&w))?;
+    let at = words.iter().position(|w| is_the_floor(&w))?;
     if !words[..at]
         .iter()
         .all(|w| w == "env" || w == "bash" || w == "sh")
@@ -5328,10 +5329,6 @@ fn floor_check(words: &[String]) -> Option<(String, u64)> {
         return None;
     }
     let mut rest = &words[at + 1..];
-    if rest.first().map(String::as_str) != Some("test-floor") {
-        return None;
-    }
-    rest = &rest[1..];
     if rest.first().map(String::as_str) == Some("--refuse-ignored") {
         rest = &rest[1..];
     }
@@ -5404,7 +5401,7 @@ fn gating_jobs(workflow: &str) -> Vec<Job> {
 }
 
 /// Every `cargo test` the pull-request gate runs is wrapped by
-/// `scripts/tier.sh`.
+/// `../rust-fs-core/scripts/tier.sh`.
 ///
 /// The wrapper is what makes the run quiet, what keeps the whole run in
 /// `tmp/logs/`, and what turns "it printed too much" into a red build. A
@@ -5433,10 +5430,10 @@ fn every_cargo_test_the_gate_runs_is_under_an_output_budget() {
 
     assert!(
         unbudgeted.is_empty(),
-        "{} runs a `cargo test` that is not wrapped by `scripts/tier.sh`, so \
+        "{} runs a `cargo test` that is not wrapped by `../rust-fs-core/scripts/tier.sh`, so \
          its output is unbounded and its full run reaches the job log rather \
          than `tmp/logs/`:\n  {}\n\
-         Wrap it: `bash scripts/tier.sh LABEL LOG MAX-LINES MAX-BYTES -- cargo \
+         Wrap it: `bash ../rust-fs-core/scripts/tier.sh LABEL LOG MAX-LINES MAX-BYTES -- cargo \
          test ...`, with the numbers MEASURED from a run and recorded in the \
          table at the top of chores.yml.",
         path.display(),
@@ -5484,7 +5481,7 @@ fn every_output_budget_is_a_number_that_can_fail_a_run() {
         }
         assert!(
             tiers > 0,
-            "{} runs no tier through `scripts/tier.sh`. If the tiers moved, \
+            "{} runs no tier through `../rust-fs-core/scripts/tier.sh`. If the tiers moved, \
              this guard moved with them and now checks nothing.",
             path.display()
         );
@@ -5571,7 +5568,7 @@ fn the_workflow_and_the_chores_file_agree_on_every_budget_and_floor() {
 /// A wrapped test tier is still COUNTED, in the job that ran it.
 ///
 /// The floors were inline in the workflow before the wrapper existed, and
-/// moving a run behind `scripts/tier.sh` is exactly the edit that could
+/// moving a run behind `../rust-fs-core/scripts/tier.sh` is exactly the edit that could
 /// drop one: the step gets shorter, the suite still passes, and the thing
 /// that notices `0 passed; 0 failed` is gone. `cargo test` exits 0 on a
 /// selection that matches nothing, so without the floor the quietest
@@ -5603,7 +5600,7 @@ fn every_budgeted_test_tier_still_counts_what_ran() {
                  and never counts it. `cargo test` exits 0 having run nothing, \
                  so this job would report green on an empty selection -- and \
                  an empty run is the one that fits its output budget best. Add \
-                 `bash scripts/core.sh test-floor {tier} N` after it, with N \
+                 `bash ../rust-fs-core/scripts/test-floor.sh {tier} N` after it, with N \
                  MEASURED and roughly a tenth below what ran.",
                 job.name,
                 path.display()
@@ -5634,7 +5631,7 @@ mod output_budget_guard {
     #[test]
     fn a_wrapped_cargo_test_is_still_a_cargo_test() {
         let w = words(
-            "bash scripts/tier.sh label debug 380 26000 -- cargo test --locked --all-targets",
+            "bash ../rust-fs-core/scripts/tier.sh label debug 380 26000 -- cargo test --locked --all-targets",
         );
         assert_eq!(
             cargo_test_arguments(&w),
@@ -5654,14 +5651,15 @@ mod output_budget_guard {
     fn a_wrapper_this_file_does_not_know_is_not_unwrapped() {
         // The strict direction: an unrecognised wrapper means the run does
         // not count, which fails loudly, rather than being waved through.
-        let w = words("sudo scripts/tier.sh label debug 1 1 -- cargo test --locked");
+        let w =
+            words("sudo ../rust-fs-core/scripts/tier.sh label debug 1 1 -- cargo test --locked");
         assert_eq!(without_the_tier_wrapper(&w), &w[..]);
         assert_eq!(cargo_test_arguments(&w), None);
     }
 
     #[test]
     fn a_merely_echoed_tier_invocation_is_not_one() {
-        let w = words("echo scripts/tier.sh label debug 380 26000 -- cargo test");
+        let w = words("echo ../rust-fs-core/scripts/tier.sh label debug 380 26000 -- cargo test");
         assert_eq!(tier_invocation(&w), None);
         assert_eq!(cargo_test_arguments(&w), None);
     }
@@ -5676,7 +5674,9 @@ mod output_budget_guard {
 
     #[test]
     fn a_tier_invocation_yields_its_log_and_both_numbers() {
-        let w = words("bash scripts/tier.sh qemu-validation qemu 130 9000 -- cargo test");
+        let w = words(
+            "bash ../rust-fs-core/scripts/tier.sh qemu-validation qemu 130 9000 -- cargo test",
+        );
         let (log, budget) = tier_invocation(&w).expect("a well-formed tier invocation");
         assert_eq!(log, "qemu");
         assert_eq!((budget.lines, budget.bytes), (130, 9000));
@@ -5687,7 +5687,7 @@ mod output_budget_guard {
         // `tier.sh` itself exits 2 on this, and a reader that accepted it
         // would report a budget on a command that never ran.
         assert_eq!(
-            tier_invocation(&words("bash scripts/tier.sh l log 10 20")),
+            tier_invocation(&words("bash ../rust-fs-core/scripts/tier.sh l log 10 20")),
             None
         );
     }
@@ -5695,7 +5695,9 @@ mod output_budget_guard {
     #[test]
     fn a_budget_that_is_not_a_number_is_not_a_budget() {
         assert_eq!(
-            tier_invocation(&words("bash scripts/tier.sh l log many lots -- cargo test")),
+            tier_invocation(&words(
+                "bash ../rust-fs-core/scripts/tier.sh l log many lots -- cargo test"
+            )),
             None,
             "a non-numeric budget must not be read as a budget: it would be \
              passed to output-budget.sh, which reads it as 0 -- no budget at \
@@ -5705,7 +5707,7 @@ mod output_budget_guard {
 
     #[test]
     fn an_environment_prefix_does_not_hide_a_tier() {
-        let w = words("EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh l debug 380 26000 -- cargo test --locked");
+        let w = words("EXPECT_OVERFLOW_CHECKS=1 bash ../rust-fs-core/scripts/tier.sh l debug 380 26000 -- cargo test --locked");
         assert!(tier_invocation(&w).is_some());
         assert_eq!(cargo_test_arguments(&w), Some(vec!["--locked"]));
     }
@@ -5713,25 +5715,29 @@ mod output_budget_guard {
     #[test]
     fn a_floor_check_yields_its_tier_and_its_number() {
         assert_eq!(
-            floor_check(&words("bash scripts/core.sh test-floor debug 210")),
-            Some(("debug".to_string(), 210))
-        );
-        assert_eq!(
             floor_check(&words(
-                "bash scripts/core.sh test-floor --refuse-ignored debug 210"
+                "bash ../rust-fs-core/scripts/test-floor.sh debug 210"
             )),
             Some(("debug".to_string(), 210))
         );
         assert_eq!(
-            floor_check(&words("echo scripts/core.sh test-floor debug 210")),
+            floor_check(&words(
+                "bash ../rust-fs-core/scripts/test-floor.sh --refuse-ignored debug 210"
+            )),
+            Some(("debug".to_string(), 210))
+        );
+        assert_eq!(
+            floor_check(&words(
+                "echo ../rust-fs-core/scripts/test-floor.sh debug 210"
+            )),
             None
         );
         assert_eq!(
-            floor_check(&words("bash scripts/core.sh test-floor debug")),
+            floor_check(&words("bash ../rust-fs-core/scripts/test-floor.sh debug")),
             None
         );
         assert_eq!(
-            floor_check(&words("bash scripts/core.sh semver-check")),
+            floor_check(&words("bash ../rust-fs-core/scripts/semver-check.sh")),
             None
         );
     }

@@ -29,7 +29,7 @@
 # stopped early and is a failure: `exit 0` part-way through is not evidence
 # a file finished.
 #
-# Quiet: the tier runs under scripts/tier.sh, which keeps the whole run in
+# Quiet: the tier runs under ../rust-fs-core/scripts/tier.sh, which keeps the whole run in
 # tmp/logs/cli.log.
 #
 # CLI_TESTS names another directory of test-*.sh files, for
