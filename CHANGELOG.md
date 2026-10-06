@@ -5,7 +5,15 @@ Notable changes to `am-img-vhd`, newest first. This is a `0.x` crate, so the
 never does.
 
 
-## [Unreleased]
+## [0.5.2] — 2026-10-06
+
+### Renamed
+
+- **The last version published as `am-img-vhd`.** The crate is renamed to
+  `rust-img-vhd`, the repository's name; every later version is published under
+  that name only, starting at 0.6.0. The description and the README say where
+  the crate went. The import changes too: `use vhd::...` becomes `use img_vhd::...`.
+
 
 ## [0.5.2] — 2026-10-06
 
