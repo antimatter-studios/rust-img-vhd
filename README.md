@@ -1,5 +1,19 @@
 # vhd
 
+> **Renamed to [`rust-img-vhd`](https://crates.io/crates/rust-img-vhd).**
+> `am-img-vhd` 0.5.2 is the last version published under this name. New versions
+> are published only as `rust-img-vhd`, starting at 0.6.0. To move, change one line
+> in `Cargo.toml`:
+>
+> ```toml
+> # before
+> am-img-vhd = "0.5"
+> # after
+> rust-img-vhd = "0.6"
+> ```
+>
+> The import changes too: `use vhd::...` becomes `use img_vhd::...`.
+
 Pure-Rust reader for the Microsoft VHD (Virtual Hard Disk) format. Spec
 implemented from Microsoft's published whitepaper; no GPL code is
 copied or linked. Exposes a Rust API and a C ABI suitable for FFI from
