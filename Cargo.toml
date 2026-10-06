@@ -14,7 +14,7 @@ exclude = ["fuzz"]
 # The name this crate had on crates.io: the semver check's baseline until
 # a release exists under the new one (rust-fs-core's semver-check.sh).
 [package.metadata.semver]
-former-name = "rust-img-vhd"
+former-name = "am-img-vhd"
 
 [lib]
 # Published as `rust-img-vhd` on crates.io; consumers `use vhd::Reader`.
