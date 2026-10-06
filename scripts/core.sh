@@ -41,14 +41,14 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-    echo "usage: scripts/core.sh test-floor|semver-check|family-check|guest-rust-toolchain|ci-gate|stage-siblings|guest-rust-run|package-cli [ARG...]" >&2
+    echo "usage: scripts/core.sh test-floor|semver-check|family-check|guest-rust-toolchain|ci-gate|stage-siblings|guest-rust-run|package-cli|release-notes|changelog-draft [ARG...]" >&2
     exit 2
 }
 [ $# -ge 1 ] || usage
 NAME="$1"
 shift
 case "$NAME" in
-    test-floor|semver-check|family-check|guest-rust-toolchain|ci-gate|stage-siblings|guest-rust-run|package-cli) ;;
+    test-floor|semver-check|family-check|guest-rust-toolchain|ci-gate|stage-siblings|guest-rust-run|package-cli|release-notes|changelog-draft) ;;
     *) echo "core.sh: rust-fs-core has no family script named '$NAME'." >&2; usage ;;
 esac
 SCRIPT_REL="scripts/$NAME.sh"

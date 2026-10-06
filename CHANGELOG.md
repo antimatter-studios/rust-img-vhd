@@ -7,6 +7,13 @@ never does.
 
 ## [Unreleased]
 
+### Changed
+
+- **A release's notes are its CHANGELOG section.** The release workflow
+  takes the GitHub release's body from `scripts/core.sh release-notes` and
+  refuses a tag the CHANGELOG does not describe, before anything is
+  published (rust-fs-core#209). It depends on rust-fs-core 0.3.1.
+
 ## [0.6.0] — 2026-10-06
 
 ### Changed
