@@ -86,7 +86,7 @@ fn write_refuses_an_input_past_the_virtual_disk_by_its_length() {
         "{}",
         String::from_utf8_lossy(&wrote.stderr)
     );
-    let r = vhd::VhdReader::open(&vhd).unwrap();
+    let r = img_vhd::VhdReader::open(&vhd).unwrap();
     let mut back = [0u8; 4];
     r.read_at(512, &mut back).unwrap();
     assert_eq!(&back, b"fits");

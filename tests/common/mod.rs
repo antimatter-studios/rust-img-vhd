@@ -2,7 +2,7 @@
 //!
 //! Only the temp-path type lives here so far. The *byte-level* fixtures
 //! deliberately stay in each test file, writing literal offsets rather
-//! than importing `vhd::format` — see that module's docs for why the
+//! than importing `img_vhd::format` — see that module's docs for why the
 //! second opinion is worth the repetition.
 
 #![allow(dead_code)] // each test binary uses a subset

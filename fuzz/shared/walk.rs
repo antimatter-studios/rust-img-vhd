@@ -61,7 +61,7 @@ pub const READ_BUDGET: u64 = 1 << 20;
 /// memory.
 pub fn walk(image: &[u8]) {
     let dev: std::sync::Arc<dyn BlockDevice> = std::sync::Arc::new(Bytes(image.to_vec()));
-    let Ok(reader) = vhd::VhdReader::open_on_device(dev) else {
+    let Ok(reader) = img_vhd::VhdReader::open_on_device(dev) else {
         return;
     };
 

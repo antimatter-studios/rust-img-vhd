@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 
 use fs_core::cli::{CliError, Json, Outcome, Tool};
-use vhd::format::footer_offsets as at;
-use vhd::{DiskType, VhdReader};
+use img_vhd::format::footer_offsets as at;
+use img_vhd::{DiskType, VhdReader};
 
 pub const TOOL: Tool = Tool {
     name: "img.vhd",
@@ -231,7 +231,7 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
     }
 }
 
-fn vhd_error(image: &Path, e: vhd::Error) -> CliError {
+fn vhd_error(image: &Path, e: img_vhd::Error) -> CliError {
     CliError::failed(format!("{}: {e}", image.display()))
 }
 
@@ -557,7 +557,7 @@ fn write(image: &Path, offset: u64) -> Result<Outcome, CliError> {
     if !r.writable() {
         // The library says why; an empty write asks it without writing.
         return Err(match r.write_at(0, &[]) {
-            Err(vhd::Error::ReadOnly(why)) => {
+            Err(img_vhd::Error::ReadOnly(why)) => {
                 CliError::not_implemented(format!("write: {}: {why}", image.display()))
             }
             Err(e) => vhd_error(image, e),

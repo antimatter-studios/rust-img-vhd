@@ -153,7 +153,7 @@ it**. Do not silence output to fit, and do not route around `tier.sh`.
 <!-- END SHARED BLOCK: agent-core v2 -->
 ## What this is
 
-Pure-Rust VHD reader and writer over `am-fs-core`, covering fixed, dynamic and
+Pure-Rust VHD reader and writer over `rust-fs-core`, covering fixed, dynamic and
 differencing images, linked into the app as a staticlib.
 
 ## Running tests
@@ -183,7 +183,7 @@ silently in release. `tests/ci_profile.rs` holds the debug run to being one.
 
 ## The pin, and why it sat still
 
-This crate depends on `am-fs-core` at **`v0.2.12`**. It was held at `v0.2.10`
+This crate depends on `rust-fs-core` at **`v0.2.12`**. It was held at `v0.2.10`
 for a while, and the reason still shapes the write path.
 
 `4e19fc9` (rust-fs-core#75) made a write past the end of a `FileDevice` a
@@ -217,7 +217,7 @@ guard at once.
 `scripts/output-budget.sh`, and **there is no copy of that script in this
 repository**. `tier.sh` resolves it when a tier starts: `$FS_CORE_ROOT`
 first, then the `../rust-fs-core` sibling, then whatever `cargo metadata`
-says the `am-fs-core` package root is. It verifies whichever it found by
+says the `rust-fs-core` package root is. It verifies whichever it found by
 running it with `--version` and requiring exactly
 `rust-fs-core-output-budget 1`, copies it to `tmp/output-budget.$$.sh` for the
 length of the run, and removes it on exit.

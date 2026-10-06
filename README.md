@@ -1,19 +1,5 @@
 # vhd
 
-> **Renamed to [`rust-img-vhd`](https://crates.io/crates/rust-img-vhd).**
-> `am-img-vhd` 0.5.2 is the last version published under this name. New versions
-> are published only as `rust-img-vhd`, starting at 0.6.0. To move, change one line
-> in `Cargo.toml`:
->
-> ```toml
-> # before
-> am-img-vhd = "0.5"
-> # after
-> rust-img-vhd = "0.6"
-> ```
->
-> The import changes too: `use vhd::...` becomes `use img_vhd::...`.
-
 Pure-Rust reader for the Microsoft VHD (Virtual Hard Disk) format. Spec
 implemented from Microsoft's published whitepaper; no GPL code is
 copied or linked. Exposes a Rust API and a C ABI suitable for FFI from
@@ -24,7 +10,7 @@ C/C++/Go/Swift.
 - [x] Fixed VHD (footer at end of file, plain pass-through to data)
 - [x] Dynamic VHD (footer + dynamic header + BAT + sparse blocks)
 - [x] Differencing VHD (parent VHD chain, fall-through reads)
-- [x] `BlockRead` + `BlockDevice` impl via `am-fs-core`
+- [x] `BlockRead` + `BlockDevice` impl via `rust-fs-core`
 - [x] Reader is generic over `Arc<dyn BlockDevice>`; path-based `open` /
   `open_rw` / `create_fixed` wrap a `FileDevice` internally, and the
   `open_on_device` / `open_rw_on_device` constructors stack the VHD layer
@@ -86,7 +72,7 @@ src/
 tests/
   synthetic.rs   hand-built fixtures: fixed, dynamic, differencing
 include/
-  vhd.h          C ABI header
+  img_vhd.h          C ABI header
 ```
 
 ## Spec
@@ -105,8 +91,8 @@ repository, not uploaded from someone's machine. To check the crates.io
 download of version `X.Y.Z`:
 
 ```sh
-curl -sSfLo am-img-vhd-X.Y.Z.crate https://static.crates.io/crates/am-img-vhd/am-img-vhd-X.Y.Z.crate
-gh attestation verify am-img-vhd-X.Y.Z.crate \
+curl -sSfLo rust-img-vhd-X.Y.Z.crate https://static.crates.io/crates/rust-img-vhd/rust-img-vhd-X.Y.Z.crate
+gh attestation verify rust-img-vhd-X.Y.Z.crate \
   --repo antimatter-studios/rust-img-vhd \
   --signer-workflow antimatter-studios/rust-img-vhd/.github/workflows/release.yml
 ```
@@ -116,13 +102,13 @@ checksum crates.io records for that version, so the file on the release
 page and the crates.io download are the same bytes.
 
 The command-line tool is attached to the same release as a tarball per
-platform, `am-img-vhd-X.Y.Z-darwin-arm64.tar.gz` and
-`am-img-vhd-X.Y.Z-linux-x86_64.tar.gz`. They are packaged and attested by
+platform, `rust-img-vhd-X.Y.Z-darwin-arm64.tar.gz` and
+`rust-img-vhd-X.Y.Z-linux-x86_64.tar.gz`. They are packaged and attested by
 rust-fs-core's shared `release-cli.yml` workflow, which this repository's
 `release.yml` calls, so that is the workflow their attestations name:
 
 ```sh
-gh attestation verify am-img-vhd-X.Y.Z-darwin-arm64.tar.gz \
+gh attestation verify rust-img-vhd-X.Y.Z-darwin-arm64.tar.gz \
   --repo antimatter-studios/rust-img-vhd \
   --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml
 ```

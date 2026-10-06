@@ -338,14 +338,14 @@ fn manifest() -> toml::Table {
 }
 
 /// The core tag this repository builds against: `v` and the version
-/// Cargo.toml requires of am-fs-core.
+/// Cargo.toml requires of rust-fs-core.
 fn core_ref() -> String {
     let version = manifest()
         .get("dependencies")
-        .and_then(|d| d.get("am-fs-core"))
+        .and_then(|d| d.get("rust-fs-core"))
         .and_then(|c| c.get("version"))
         .and_then(toml::Value::as_str)
-        .expect("Cargo.toml requires a version of am-fs-core")
+        .expect("Cargo.toml requires a version of rust-fs-core")
         .to_owned();
     format!("v{version}")
 }

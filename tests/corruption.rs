@@ -10,7 +10,7 @@ use std::path::Path;
 
 mod common;
 use common::{tmp_path_with, TempPath};
-use vhd::{Error, VhdReader};
+use img_vhd::{Error, VhdReader};
 
 /// A fixed disk of about 1 MiB whose size its CHS geometry describes
 /// exactly (31/4/17 = 2108 sectors), so `create_fixed` creates it at
@@ -94,7 +94,7 @@ fn corrupt_footer_disk_type_is_unsupported() {
     f.seek(SeekFrom::Start(footer_offset())).unwrap();
     f.read_exact(&mut footer).unwrap();
     footer[60..64].copy_from_slice(&9u32.to_be_bytes());
-    let cs = vhd::footer::compute_checksum(&footer);
+    let cs = img_vhd::footer::compute_checksum(&footer);
     footer[64..68].copy_from_slice(&cs.to_be_bytes());
     f.seek(SeekFrom::Start(footer_offset())).unwrap();
     f.write_all(&footer).unwrap();

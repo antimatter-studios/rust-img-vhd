@@ -30,9 +30,9 @@ jobs:
       # where a failing tier stopped reading its log aloud and which carries
       # scripts/output-budget.sh (rust-fs-core#153 — not committed here).
       # The dependency is on v0.2.14 now, so one checkout satisfies both.
-      - name: clone am-fs-core sibling (path dep, and the output-budget wrapper)
+      - name: clone rust-fs-core sibling (path dep, and the output-budget wrapper)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.0 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -63,9 +63,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: clone am-fs-core sibling
+      - name: clone rust-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.0 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -95,9 +95,9 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-      - name: clone am-fs-core sibling (path dep)
+      - name: clone rust-fs-core sibling (path dep)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.0 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
         with:
           toolchain: 1.95.0
@@ -114,10 +114,31 @@ jobs:
         shell: bash
         run: cargo package --no-verify
 
+      # ALREADY PUBLISHED IS NOT A FAILURE. A crate's first version under a
+      # new name cannot come from here: trusted publishing needs the crate to
+      # exist before its publisher can be registered, so that version is
+      # published by hand from this tag's commit. The run then has nothing to
+      # upload, and the checksum step below still holds the version crates.io
+      # serves to the archive built here.
+      - name: is this version already on crates.io
+        id: published
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="$(grep -m1 '^name = ' Cargo.toml | sed 's/name = //; s/"//g')"
+          version="$(grep -m1 '^version = ' Cargo.toml | sed 's/version = //; s/"//g')"
+          code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -A "${GITHUB_REPOSITORY} release (github.com/${GITHUB_REPOSITORY})" \
+            "https://crates.io/api/v1/crates/$name/$version")"
+          echo "crates.io answered $code for $name $version"
+          if [ "$code" = 200 ]; then echo "already=true" >> "$GITHUB_OUTPUT"; else echo "already=false" >> "$GITHUB_OUTPUT"; fi
+
       - uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
+        if: steps.published.outputs.already != 'true'
         id: auth
 
       - name: cargo publish
+        if: steps.published.outputs.already != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish
@@ -188,7 +209,7 @@ jobs:
   #   gh attestation verify <tarball> --repo antimatter-studios/rust-img-vhd \
   #     --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml
   #
-  # core-ref is the am-fs-core version Cargo.toml requires and toolchain is
+  # core-ref is the rust-fs-core version Cargo.toml requires and toolchain is
   # rust-toolchain.toml's channel; tests/release_attestation.rs fails when
   # either disagrees, or when the call is not pinned by commit SHA.
   cli:
@@ -197,7 +218,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@0f7714910080f5f2a080ed6032cccf19bc338064 # v0.2.23
+    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@9e900154a7dff2a6c8f136db31def33bed9f09cc # v0.3.0
     with:
-      core-ref: v0.2.23
+      core-ref: v0.3.0
       toolchain: 1.95.0

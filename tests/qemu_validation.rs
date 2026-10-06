@@ -33,9 +33,9 @@ use std::process::Command;
 
 mod common;
 use common::{tmp_path_with, TempPath};
-use vhd::footer::FOOTER_SIZE;
-use vhd::footer_build::chs_for_size;
-use vhd::{footer::DiskType, VhdReader};
+use img_vhd::footer::FOOTER_SIZE;
+use img_vhd::footer_build::chs_for_size;
+use img_vhd::{footer::DiskType, VhdReader};
 
 const QEMU_IMG: &str = "qemu-img";
 
@@ -619,5 +619,5 @@ fn a_bat_entry_in_the_metadata_is_refused_on_a_qemu_produced_image() {
     let err = VhdReader::open(&vhd)
         .err()
         .expect("a BAT entry naming the footer mirror must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
