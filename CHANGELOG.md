@@ -5,6 +5,8 @@ Notable changes to `am-img-vhd`, newest first. This is a `0.x` crate, so the
 never does.
 
 
+## [Unreleased]
+
 ## [0.5.2] — 2026-10-06
 
 ### Renamed
