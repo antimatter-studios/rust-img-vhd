@@ -16,13 +16,13 @@ chore_min_version: 0.6.0
 #
 # `artifact` PRINTS A DIRECTORY, NOT A FILE. That is the one place this
 # differs from rust-blk-probe, whose single binary lets its `artifact` name
-# a file: this crate produces libvhd.a AND the headers beside it, so
+# a file: this crate produces libimg_vhd.a AND the headers beside it, so
 # there is no single path to name.
 #
 # WHY fs_core.h IS COPIED TOO. include/vhd.h opens with
 # `#include "fs_core.h"` — this crate's C ABI hands out FsCoreDevice handles —
-# so a consumer given only vhd.h cannot compile. The path below is the same
-# one Cargo.toml resolves am-fs-core from, and NOTHING CHECKS THAT THE TWO
+# so a consumer given only img_vhd.h cannot compile. The path below is the same
+# one Cargo.toml resolves rust-fs-core from, and NOTHING CHECKS THAT THE TWO
 # AGREE.
 # QUIET BY DEFAULT, --verbose ON REQUEST, AND THE BUDGET IS A NUMBER.
 #
@@ -89,7 +89,7 @@ chore_min_version: 0.6.0
 #   'rust-fs-core-output-budget 1' to --version, copies it into tmp/ for the
 #   length of the run and deletes it afterwards. It looks at $FS_CORE_ROOT
 #   first, then the ../rust-fs-core sibling, then wherever cargo says the
-#   am-fs-core package is, and it FAILS rather than falling back to anything
+#   rust-fs-core package is, and it FAILS rather than falling back to anything
 #   local. A committed copy is a copy that drifts, which is the whole of
 #   antimatter-studios/rust-fs-core#153; tests/output_budget.rs holds the
 #   resolver to that, including both refusals.
@@ -103,9 +103,9 @@ chore_min_version: 0.6.0
 #   this repository.
 vars:
   TRIPLE: aarch64-apple-darwin
-  # `[package].name` is am-img-vhd; `[lib].name` is vhd, so cargo writes
-  # libvhd.a. The header mirrors the lib name, not the package name.
-  LIBNAME: vhd
+  # `[package].name` is rust-img-vhd; `[lib].name` is vhd, so cargo writes
+  # libimg_vhd.a. The header mirrors the lib name, not the package name.
+  LIBNAME: img_vhd
 
 tasks:
   staticlib:
@@ -325,7 +325,7 @@ tasks:
     #
     # IT PRINTS A DIRECTORY, NOT A FILE, and that is the one place this differs
     # from rust-blk-probe's `artifact`. That crate produces a single binary, so
-    # it can name a file. This one produces libvhd.a AND the headers beside it,
+    # it can name a file. This one produces libimg_vhd.a AND the headers beside it,
     # so there is no single path to name — A CONSUMER COPIES THE CONTENTS of
     # what this prints. A consumer that treats it as a file path will silently
     # copy the wrong thing.

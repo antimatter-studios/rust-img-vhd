@@ -4,8 +4,8 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    if let Ok(header) = vhd::dynamic::DynamicHeader::parse(data) {
+    if let Ok(header) = img_vhd::dynamic::DynamicHeader::parse(data) {
         let _ = header.bitmap_size_bytes();
     }
-    let _ = vhd::dynamic::compute_checksum(data);
+    let _ = img_vhd::dynamic::compute_checksum(data);
 });

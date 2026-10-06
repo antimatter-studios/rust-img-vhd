@@ -788,7 +788,7 @@ impl VhdReader {
     ///
     /// `write_at` used to extend a `FileDevice` implicitly, and that is
     /// how this format allocated: write the new block past the old end,
-    /// then record where it went. `am-fs-core` withdrew that (#75), and
+    /// then record where it went. `rust-fs-core` withdrew that (#75), and
     /// correctly -- the file grew while `size_bytes()` went on reporting
     /// the length taken at open, so a caching device could hold bytes no
     /// bounded read could reach (rust-fs-core#70). `set_len` is the
@@ -1183,7 +1183,7 @@ impl VhdReader {
         // MAKE ROOM FIRST: NOTHING BELOW EXTENDS THE FILE BY WRITING PAST
         // ITS END ANY MORE (#99).
         //
-        // `am-fs-core` 0.2.12 is where an allocation stops being an
+        // `rust-fs-core` 0.2.12 is where an allocation stops being an
         // implicit `ftruncate` hidden inside a write. `write_at` refuses
         // anything ending past `size_bytes()`, so the footer's new copy --
         // the first write below, and the one that used to do the growing --

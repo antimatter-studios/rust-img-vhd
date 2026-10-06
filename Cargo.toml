@@ -1,9 +1,9 @@
 [package]
-name = "am-img-vhd"
-version = "0.5.2"
+name = "rust-img-vhd"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
-description = "Renamed to rust-img-vhd: this crate receives no further versions. Depend on rust-img-vhd instead; the import becomes use img_vhd."
+description = "Pure-Rust VHD (Microsoft Virtual Hard Disk) reader. Fixed, dynamic, and differencing variants. Exposes a Rust API and a C ABI suitable for FFI from C/C++/Go/Swift."
 repository = "https://github.com/antimatter-studios/rust-img-vhd"
 
 # The fuzz crate is its own package, on its own toolchain, and is not
@@ -11,9 +11,14 @@ repository = "https://github.com/antimatter-studios/rust-img-vhd"
 # try to include it and fail on the nightly-only dependency.
 exclude = ["fuzz"]
 
+# The name this crate had on crates.io: the semver check's baseline until
+# a release exists under the new one (rust-fs-core's semver-check.sh).
+[package.metadata.semver]
+former-name = "rust-img-vhd"
+
 [lib]
-# Published as `am-img-vhd` on crates.io; consumers `use vhd::Reader`.
-name = "vhd"
+# Published as `rust-img-vhd` on crates.io; consumers `use vhd::Reader`.
+name = "img_vhd"
 crate-type = ["staticlib", "rlib"]
 
 # THE COMMAND-LINE TOOL: one multi-call binary, named for the repository.
@@ -44,9 +49,9 @@ licenses = ["LICENSE"]
 [features]
 # The command-line tool and nothing else. The plumbing it shares with the
 # family's other tools -- dispatch, --version, doctor, the output contract,
-# man pages and completions -- is am-fs-core's `cli` feature, turned on only
+# man pages and completions -- is rust-fs-core's `cli` feature, turned on only
 # here, so the static library gains nothing. clap is MIT/Apache-2.0.
-cli = ["dep:clap", "am-fs-core/cli"]
+cli = ["dep:clap", "rust-fs-core/cli"]
 # Enables the qemu-img cross-validation test binary. Off by default so
 # `cargo test` does not require qemu-img on PATH. CI installs qemu-utils
 # and runs `cargo test --features qemu-validation --test qemu_validation`
@@ -68,7 +73,7 @@ qemu-validation = []
 # 0.2.23 is the first release with scripts/package-cli.sh and the
 # release-cli workflow release.yml calls (#134): the tarball's packaging is
 # core's now, and the path sibling must carry it.
-am-fs-core = { path = "../rust-fs-core", version = "0.2.23" }
+rust-fs-core = { path = "../rust-fs-core", version = "0.3.0" }
 # The command-line tool's argument parser, behind the `cli` feature (see the
 # `rust-img-vhd` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.

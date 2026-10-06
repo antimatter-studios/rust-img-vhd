@@ -78,7 +78,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #      the layout Cargo.toml's path dependency already requires, so a
 #      coordinated local change to the wrapper is exercised here on the next
 #      run rather than after a release.
-#   3. Whatever `cargo metadata` says the am-fs-core package root is. Today
+#   3. Whatever `cargo metadata` says the rust-fs-core package root is. Today
 #      that is the sibling again; it becomes the answer that matters on the
 #      day this crate depends on the published crate instead (#96, #99).
 #
@@ -100,7 +100,7 @@ expectations() {
     echo "         Expected one of:" >&2
     echo "           \$FS_CORE_ROOT/scripts/output-budget.sh   (absolute, or relative to this repository)" >&2
     echo "           $REPO/../rust-fs-core/scripts/output-budget.sh" >&2
-    echo "           <the am-fs-core package root>/scripts/output-budget.sh" >&2
+    echo "           <the rust-fs-core package root>/scripts/output-budget.sh" >&2
     echo "         answering '$API_VERSION' to --version." >&2
     echo "         The wrapper ships in rust-fs-core from v0.2.11 and has been quiet" >&2
     echo "         on failure since $MIN_CORE, which is the minimum this repository" >&2
@@ -137,7 +137,7 @@ try:
 except Exception:
     sys.exit(0)
 print(next((p["manifest_path"].rsplit("/", 1)[0]
-            for p in packages if p["name"] == "am-fs-core"), ""))
+            for p in packages if p["name"] == "rust-fs-core"), ""))
 ' 2>/dev/null || true)"
     if [ -n "$CORE_DIR" ] && [ -f "$CORE_DIR/scripts/output-budget.sh" ]; then
         WRAPPER="$CORE_DIR/scripts/output-budget.sh"

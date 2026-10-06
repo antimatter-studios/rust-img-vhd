@@ -13,13 +13,13 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 
-use vhd::dynamic::{
+use img_vhd::dynamic::{
     compute_checksum as dyn_cs, BAT_UNALLOCATED, DYN_HEADER_COOKIE, DYN_HEADER_SIZE,
 };
-use vhd::footer::{compute_checksum as footer_cs, FOOTER_COOKIE, FOOTER_SIZE};
+use img_vhd::footer::{compute_checksum as footer_cs, FOOTER_COOKIE, FOOTER_SIZE};
 mod common;
 use common::{cwd_path_with, tmp_path_with, TempPath};
-use vhd::{DiskType, VhdReader};
+use img_vhd::{DiskType, VhdReader};
 
 fn tmp_path(name: &str) -> TempPath {
     tmp_path_with("vhd_synth", name, "vhd")
@@ -120,7 +120,7 @@ fn fixed_read_past_end_errors() {
     let r = VhdReader::open(&path).unwrap();
     let mut buf = [0u8; 16];
     match r.read_at(virt_size - 8, &mut buf) {
-        Err(vhd::Error::OutOfBounds { offset, len, size }) => {
+        Err(img_vhd::Error::OutOfBounds { offset, len, size }) => {
             assert_eq!(offset, virt_size - 8, "the refusal names the wrong offset");
             assert_eq!(len, 16, "the refusal names the wrong length");
             assert_eq!(size, virt_size, "the refusal names the wrong image size");
@@ -554,7 +554,10 @@ fn write_past_virtual_size_returns_out_of_bounds() {
     let virt_size = r.virtual_size();
     let buf = vec![0u8; 16];
     let err = r.write_at(virt_size - 8, &buf).unwrap_err();
-    assert!(matches!(err, vhd::Error::OutOfBounds { .. }), "got {err:?}");
+    assert!(
+        matches!(err, img_vhd::Error::OutOfBounds { .. }),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -566,7 +569,10 @@ fn write_into_footer_region_returns_out_of_bounds() {
     // must be rejected: that's footer territory.
     let buf = [0u8; 1];
     let err = r.write_at(virt_size, &buf).unwrap_err();
-    assert!(matches!(err, vhd::Error::OutOfBounds { .. }), "got {err:?}");
+    assert!(
+        matches!(err, img_vhd::Error::OutOfBounds { .. }),
+        "got {err:?}"
+    );
     // After a rejected write, the footer must still parse cleanly: reopen.
     drop(r);
     let _r2 = VhdReader::open(&path).expect("footer survives rejected write");
@@ -587,7 +593,7 @@ fn fixed_opened_read_only_is_not_writable() {
     let buf = [0u8; 16];
     let err = r.write_at(0, &buf).unwrap_err();
     assert!(
-        matches!(err, vhd::Error::ReadOnly("reader was opened read-only")),
+        matches!(err, img_vhd::Error::ReadOnly("reader was opened read-only")),
         "got {err:?}"
     );
 }
@@ -621,7 +627,7 @@ fn dynamic_opened_read_only_rejects_writes() {
     let buf = [0u8; 16];
     let err = r.write_at(0, &buf).unwrap_err();
     assert!(
-        matches!(err, vhd::Error::ReadOnly("reader was opened read-only")),
+        matches!(err, img_vhd::Error::ReadOnly("reader was opened read-only")),
         "got {err:?}"
     );
 }
@@ -660,7 +666,7 @@ fn differencing_is_not_writable() {
     assert!(
         matches!(
             err,
-            vhd::Error::ReadOnly("differencing images have no write path yet")
+            img_vhd::Error::ReadOnly("differencing images have no write path yet")
         ),
         "got {err:?}"
     );
@@ -690,7 +696,7 @@ fn create_fixed_rejects_unaligned_size() {
     let path = tmp_path("create_unaligned");
     match VhdReader::create_fixed(&path, 1024 + 1) {
         Ok(_) => panic!("expected error for unaligned size"),
-        Err(e) => assert!(matches!(e, vhd::Error::Corrupt(_)), "got {e:?}"),
+        Err(e) => assert!(matches!(e, img_vhd::Error::Corrupt(_)), "got {e:?}"),
     }
 }
 
@@ -758,7 +764,7 @@ fn open_rw_on_device_rejects_readonly_inner() {
     }
     let dev = Arc::new(FileDevice::open(&path).unwrap()) as Arc<dyn fs_core::BlockDevice>;
     match VhdReader::open_rw_on_device(dev) {
-        Err(vhd::Error::ReadOnly("backing device is not writable")) => {}
+        Err(img_vhd::Error::ReadOnly("backing device is not writable")) => {}
         Err(e) => panic!("expected ReadOnly, got error {e:?}"),
         Ok(_) => panic!("expected ReadOnly, got Ok"),
     }
@@ -781,7 +787,7 @@ fn vhd_open_rw_on_device_says_the_backing_device_is_not_writable() {
     }
     let ro = Arc::new(FileDevice::open(&path).unwrap()) as Arc<dyn fs_core::BlockDevice>;
     let inner = FsCoreDevice::into_handle(ro);
-    let out = unsafe { vhd::capi::vhd_open_rw_on_device(inner) };
+    let out = unsafe { img_vhd::capi::vhd_open_rw_on_device(inner) };
     assert!(
         out.is_null(),
         "a read-only inner device was opened read-write"
@@ -813,7 +819,7 @@ fn differencing_on_device_rejected() {
 
     let dev = Arc::new(FileDevice::open(&child_path).unwrap()) as Arc<dyn fs_core::BlockDevice>;
     match VhdReader::open_on_device(dev) {
-        Err(vhd::Error::Unsupported(_)) => {}
+        Err(img_vhd::Error::Unsupported(_)) => {}
         Err(e) => panic!("expected Unsupported, got error {e:?}"),
         Ok(_) => panic!("expected Unsupported, got Ok"),
     }
@@ -1244,7 +1250,7 @@ fn a_bat_entry_pointing_into_the_metadata_is_refused_at_open() {
     let err = VhdReader::open(&path)
         .err()
         .expect("an image whose BAT points at its own footer must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
 #[test]
@@ -1256,7 +1262,7 @@ fn a_bat_entry_landing_on_the_last_metadata_sector_is_refused_at_open() {
     let err = VhdReader::open(&path)
         .err()
         .expect("an image whose BAT points at the BAT must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
 #[test]
@@ -1276,7 +1282,7 @@ fn a_bat_entry_past_the_end_of_the_image_is_refused_at_open() {
     let err = VhdReader::open(&path)
         .err()
         .expect("an image whose BAT points past its own end must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
 #[test]
@@ -1297,7 +1303,7 @@ fn a_bat_entry_whose_block_reaches_the_trailing_footer_is_refused_at_open() {
     let err = VhdReader::open(&path)
         .err()
         .expect("a block whose last sector is the trailing footer must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
 #[test]
@@ -1332,7 +1338,7 @@ fn two_bat_entries_naming_one_block_are_refused_at_open() {
     let err = VhdReader::open(&path)
         .err()
         .expect("an image with two BAT entries at one address must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
 /// The canonical dynamic fixture with its BAT set to `entries` and its
@@ -1363,7 +1369,7 @@ fn two_bat_entries_whose_blocks_partially_overlap_are_refused_at_open() {
     let err = VhdReader::open(&path)
         .err()
         .expect("two BAT entries one sector apart alias each other's bytes and must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
 #[test]
@@ -1380,7 +1386,7 @@ fn two_bat_entries_exactly_one_block_apart_are_accepted() {
     let err = VhdReader::open(&path)
         .err()
         .expect("blocks eight sectors apart share a sector and must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
 /// A differencing child beside a real parent, with parent-locator 0 set
@@ -1437,7 +1443,7 @@ fn a_parent_locator_inside_a_block_is_refused_at_open() {
     let err = VhdReader::open(&child)
         .err()
         .expect("a locator payload inside a block aliases guest data and must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
 #[test]
@@ -1462,7 +1468,10 @@ fn a_parent_locator_over_the_image_metadata_is_refused_at_open() {
         let err = VhdReader::open(&child)
             .err()
             .unwrap_or_else(|| panic!("a locator payload overlapping {what} must be refused"));
-        assert!(matches!(err, vhd::Error::Corrupt(_)), "{what}: got {err:?}");
+        assert!(
+            matches!(err, img_vhd::Error::Corrupt(_)),
+            "{what}: got {err:?}"
+        );
     }
 }
 
@@ -1608,7 +1617,7 @@ fn an_unreadable_mirror_reports_the_trailing_footer_error() {
     let err = VhdReader::open_on_device(std::sync::Arc::new(dev))
         .err()
         .expect("no readable footer must be refused");
-    assert!(matches!(err, vhd::Error::NotVhd), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::NotVhd), "got {err:?}");
 }
 
 /// A trailing footer damaged in place but still carrying its cookie is
@@ -1634,7 +1643,7 @@ fn a_block_over_a_damaged_footer_that_kept_its_cookie_is_refused() {
     let err = VhdReader::open(&path)
         .err()
         .expect("a block whose last sector is the (damaged) footer must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
 /// With both copies gone there is nothing to recover from.
@@ -1644,7 +1653,7 @@ fn a_dynamic_image_with_both_footers_damaged_is_refused() {
     let err = VhdReader::open(&path)
         .err()
         .expect("no valid footer anywhere must be refused");
-    assert!(matches!(err, vhd::Error::NotVhd), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::NotVhd), "got {err:?}");
 }
 
 /// Only a sparse footer is a mirror. A fixed image has none: its first
@@ -1662,7 +1671,7 @@ fn a_fixed_footer_at_offset_0_does_not_stand_in_for_a_damaged_tail() {
     let err = VhdReader::open(&path)
         .err()
         .expect("a fixed image with no trailing footer must be refused");
-    assert!(matches!(err, vhd::Error::NotVhd), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::NotVhd), "got {err:?}");
 }
 
 #[test]
@@ -1716,12 +1725,12 @@ fn a_sparse_image_whose_length_is_not_a_multiple_of_512_is_refused() {
     let err = VhdReader::open(&path)
         .err()
         .expect("an off-grid sparse image must be refused");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 
     let err = VhdReader::open_rw(&path)
         .err()
         .expect("and refused for writing too");
-    assert!(matches!(err, vhd::Error::Corrupt(_)), "got {err:?}");
+    assert!(matches!(err, img_vhd::Error::Corrupt(_)), "got {err:?}");
 }
 
 /// The positive control: the same fixture at its natural length still
@@ -1919,7 +1928,7 @@ fn a_parent_that_is_not_the_one_the_child_names_is_refused() {
         .err()
         .expect("a parent whose unique_id does not match must be refused");
     match err {
-        vhd::Error::ParentNotFound(m) => {
+        img_vhd::Error::ParentNotFound(m) => {
             assert!(
                 m.contains("22222222"),
                 "the message must name what it found: {m}"
@@ -1959,7 +1968,10 @@ fn a_parent_id_differing_in_one_byte_at_either_end_is_still_a_different_parent()
         build_differencing_vhd_claiming(&child, &parent, ours);
 
         assert!(
-            matches!(VhdReader::open(&child), Err(vhd::Error::ParentNotFound(_))),
+            matches!(
+                VhdReader::open(&child),
+                Err(img_vhd::Error::ParentNotFound(_))
+            ),
             "a difference in byte {at} is still a different parent"
         );
     }
@@ -2028,7 +2040,7 @@ fn an_absolute_parent_name_is_refused_though_the_file_is_there() {
     build_differencing_vhd_named(&child, &absolute, [0x22u8; 16]);
 
     match VhdReader::open(&child) {
-        Err(vhd::Error::ParentNotFound(m)) => assert!(
+        Err(img_vhd::Error::ParentNotFound(m)) => assert!(
             m.contains("path rather than a file name"),
             "refused, but not for being a path: {m}"
         ),
@@ -2061,7 +2073,7 @@ fn a_parent_name_that_climbs_out_of_the_directory_is_refused() {
     build_differencing_vhd_named(&child, &name, [0x22u8; 16]);
 
     match VhdReader::open(&child) {
-        Err(vhd::Error::ParentNotFound(m)) => assert!(
+        Err(img_vhd::Error::ParentNotFound(m)) => assert!(
             m.contains("path rather than a file name"),
             "refused, but not for being a path: {m}"
         ),
@@ -2083,7 +2095,7 @@ fn a_windows_spelled_parent_path_is_refused_as_a_path() {
     build_differencing_vhd_named(&child, "..\\elsewhere\\base.vhd", [0x22u8; 16]);
 
     match VhdReader::open(&child) {
-        Err(vhd::Error::ParentNotFound(m)) => assert!(
+        Err(img_vhd::Error::ParentNotFound(m)) => assert!(
             m.contains("path rather than a file name"),
             "refused, but not for being a path: {m}"
         ),
@@ -2099,7 +2111,7 @@ fn a_drive_letter_parent_name_is_refused_as_a_path() {
     build_differencing_vhd_named(&child, "C:base.vhd", [0x22u8; 16]);
 
     match VhdReader::open(&child) {
-        Err(vhd::Error::ParentNotFound(m)) => assert!(
+        Err(img_vhd::Error::ParentNotFound(m)) => assert!(
             m.contains("path rather than a file name"),
             "refused, but not for being a path: {m}"
         ),
@@ -2178,7 +2190,7 @@ fn a_parent_only_in_the_working_directory_is_not_found() {
     let opened = VhdReader::open(&child);
 
     match opened {
-        Err(vhd::Error::ParentNotFound(m)) => assert!(
+        Err(img_vhd::Error::ParentNotFound(m)) => assert!(
             m.contains("beside the child"),
             "refused, but not for the parent's absence beside the child: {m}"
         ),
@@ -2542,7 +2554,7 @@ fn an_allocation_onto_a_device_that_cannot_grow_leaves_the_image_untouched() {
             .write_at(0, &[0xAB; 16])
             .expect_err("a device that cannot grow cannot take a new block");
         assert!(
-            matches!(err, vhd::Error::ReadOnly(_)),
+            matches!(err, img_vhd::Error::ReadOnly(_)),
             "a refused grow must surface as the device's refusal, got {err:?}"
         );
     }

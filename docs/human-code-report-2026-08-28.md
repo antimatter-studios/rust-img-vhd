@@ -1,4 +1,4 @@
-# Human-code report — am-img-vhd
+# Human-code report — rust-img-vhd
 
 **This document is analysis only. No code was changed. No files other than this one were
 created or modified, nothing was committed, and no branch was made.** Phases 0 (Understand),
@@ -12,7 +12,7 @@ implementation pass) was deliberately not started, pending your read of this doc
 | | |
 |---|---|
 | **Date** | 2026-08-28 |
-| **Crate** | `am-img-vhd` 0.3.2 (`[lib] name = "vhd"`), `/Volumes/sdcard256gb/projects/rust-img-vhd` |
+| **Crate** | `rust-img-vhd` 0.3.2 (`[lib] name = "vhd"`), `/Volumes/sdcard256gb/projects/rust-img-vhd` |
 | **Scope** | Full crate — `src/` (6 modules + 1 bin), `tests/` (3 suites), `include/vhd.h`, `chores.yml` |
 | **Lines scanned** | 3,233 Rust (1,672 `src/`, 1,295 `tests/`, 118 `src/bin/`) |
 | **Items found** | **28** |
@@ -640,10 +640,10 @@ implicitly in the `"   "` width.
 - **Test coverage:** None — nothing checks the header against the build.
 
 The header says *"Link with libam\_img\_vhd.a"*. `[lib] name = "vhd"` (`Cargo.toml:11`), so cargo
-emits `libvhd.a`, and `chores.yml:77` copies `lib{{.LIBNAME}}.a` = `libvhd.a`.
+emits `libimg_vhd.a`, and `chores.yml:77` copies `lib{{.LIBNAME}}.a` = `libimg_vhd.a`.
 
 The comment immediately above the variable in `chores.yml:29-30` calls out this exact trap —
-*"`[package].name` is am-img-vhd; `[lib].name` is vhd, so cargo writes libvhd.a. The header
+*"`[package].name` is rust-img-vhd; `[lib].name` is vhd, so cargo writes libimg_vhd.a. The header
 mirrors the lib name, not the package name."* The one file that got it wrong is the one a C
 consumer reads first.
 

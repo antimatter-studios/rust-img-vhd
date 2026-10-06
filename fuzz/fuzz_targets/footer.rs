@@ -8,6 +8,6 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = vhd::Footer::parse(data);
-    let _ = vhd::footer::compute_checksum(data);
+    let _ = img_vhd::Footer::parse(data);
+    let _ = img_vhd::footer::compute_checksum(data);
 });

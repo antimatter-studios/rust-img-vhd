@@ -1,7 +1,7 @@
 //! CHS geometry checked against something other than itself.
 //!
 //! The footer's legacy `disk_geometry` word is produced by
-//! [`vhd::footer_build::chs_for_size`], a literal transcription of the
+//! [`img_vhd::footer_build::chs_for_size`], a literal transcription of the
 //! pseudo-code in the Microsoft VHD Image Format Specification (October
 //! 2006), section "Disk Geometry". A transcription can be wrong — a
 //! rung of the sectors-per-track ladder mistyped, a `>=` written as a
@@ -51,7 +51,7 @@
 //! `qemu_geometry_is_a_fixed_point_of_our_ladder` in
 //! `tests/qemu_validation.rs`, behind the `qemu-validation` feature.
 
-use vhd::footer_build::chs_for_size;
+use img_vhd::footer_build::chs_for_size;
 
 /// `(size_bytes, cylinders, heads, sectors_per_track)`.
 ///
