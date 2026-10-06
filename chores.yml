@@ -19,7 +19,7 @@ chore_min_version: 0.6.0
 # a file: this crate produces libimg_vhd.a AND the headers beside it, so
 # there is no single path to name.
 #
-# WHY fs_core.h IS COPIED TOO. include/vhd.h opens with
+# WHY fs_core.h IS COPIED TOO. include/img_vhd.h opens with
 # `#include "fs_core.h"` — this crate's C ABI hands out FsCoreDevice handles —
 # so a consumer given only img_vhd.h cannot compile. The path below is the same
 # one Cargo.toml resolves rust-fs-core from, and NOTHING CHECKS THAT THE TWO

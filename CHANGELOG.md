@@ -26,16 +26,6 @@ never does.
   the crate went. The import changes too: `use vhd::...` becomes `use img_vhd::...`.
 
 
-## [0.5.2] — 2026-10-06
-
-### Renamed
-
-- **The last version published as `am-img-vhd`.** The crate is renamed to
-  `rust-img-vhd`, the repository's name; every later version is published under
-  that name only, starting at 0.6.0. The description and the README say where
-  the crate went. The import changes too: `use vhd::...` becomes `use img_vhd::...`.
-
-
 ### Changed
 
 - **The release tarballs are packaged, attested and attached by
