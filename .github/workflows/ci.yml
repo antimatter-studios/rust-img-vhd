@@ -48,7 +48,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.2
+          ref: v0.3.7
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -201,7 +201,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.2
+          ref: v0.3.7
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -264,7 +264,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.2
+          ref: v0.3.7
           path: rust-fs-core
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -336,7 +336,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.2
+          ref: v0.3.7
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -433,7 +433,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.2
+          ref: v0.3.7
           path: rust-fs-core
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
@@ -517,7 +517,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.2
+          ref: v0.3.7
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
