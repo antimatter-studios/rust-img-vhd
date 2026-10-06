@@ -495,7 +495,7 @@ fn the_tool_tarballs_are_released_by_core_release_cli() {
     ] {
         assert!(
             !Path::new(env!("CARGO_MANIFEST_DIR")).join(copy).exists(),
-            "{copy} is a local copy of rust-fs-core's packaging; run it as scripts/core.sh package-cli"
+            "{copy} is a local copy of rust-fs-core's packaging; run it as ../rust-fs-core/scripts/package-cli.sh"
         );
     }
     for rel in [".github/workflows/ci.yml", "chores.yml"] {
@@ -503,8 +503,11 @@ fn the_tool_tarballs_are_released_by_core_release_cli() {
             !read(rel)
                 .lines()
                 .filter(|l| !l.trim_start().starts_with('#'))
-                .any(|l| l.contains("scripts/package-cli.sh")),
-            "{rel} runs a local scripts/package-cli.sh; run scripts/core.sh package-cli"
+                .any(|l| {
+                    l.contains("scripts/package-cli.sh")
+                        && !l.contains("rust-fs-core/scripts/package-cli.sh")
+                }),
+            "{rel} runs a local scripts/package-cli.sh; run ../rust-fs-core/scripts/package-cli.sh"
         );
     }
     // What ships: the one dotted name, in section 1, and the licence. The

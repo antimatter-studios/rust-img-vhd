@@ -15,12 +15,8 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
-    # The suite runs through scripts/tier.sh, and tests/output_budget.rs runs
-    # tier.sh itself, so this job needs the core checkout that carries the
-    # output-budget wrapper. Relative to the repository, which is what
-    # tier.sh resolves a relative FS_CORE_ROOT against.
-    env:
-      FS_CORE_ROOT: ../rust-fs-core
+    # The suite runs through ../rust-fs-core/scripts/tier.sh, in place, so
+    # this job needs the core checkout beside this one.
     steps:
       - uses: actions/checkout@v5
 
@@ -28,11 +24,11 @@ jobs:
       # v0.2.12, the first core with the `set_len` an allocation calls before
       # it grows the image (#99); the tooling pin needed at least v0.2.13,
       # where a failing tier stopped reading its log aloud and which carries
-      # scripts/output-budget.sh (rust-fs-core#153 — not committed here).
+      # ../rust-fs-core/scripts/output-budget.sh (rust-fs-core#153 — not committed here).
       # The dependency is on v0.2.14 now, so one checkout satisfies both.
       - name: clone rust-fs-core sibling (path dep, and the output-budget wrapper)
         shell: bash
-        run: git clone --depth 1 --branch v0.3.1 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.2 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -65,7 +61,7 @@ jobs:
 
       - name: clone rust-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.3.1 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.2 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -97,7 +93,7 @@ jobs:
           persist-credentials: false
       - name: clone rust-fs-core sibling (path dep)
         shell: bash
-        run: git clone --depth 1 --branch v0.3.1 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.2 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
         with:
           toolchain: 1.95.0
@@ -114,7 +110,7 @@ jobs:
       # anything (rust-fs-core#209).
       - name: the CHANGELOG describes this version
         shell: bash
-        run: bash scripts/core.sh release-notes "$GITHUB_REF_NAME" >/dev/null
+        run: bash ../rust-fs-core/scripts/release-notes.sh "$GITHUB_REF_NAME" >/dev/null
 
       - name: package the crate
         shell: bash
@@ -188,7 +184,7 @@ jobs:
         run: |
           set -euo pipefail
           # The release body is this version's CHANGELOG section (rust-fs-core#209).
-          bash scripts/core.sh release-notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+          bash ../rust-fs-core/scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
@@ -202,7 +198,7 @@ jobs:
   #
   # Packaged, attested and attached by rust-fs-core's release-cli workflow,
   # the family's one copy (#134): a native leg per platform builds
-  # rust-img-vhd and runs `scripts/core.sh package-cli`, which stages the
+  # rust-img-vhd and runs `../rust-fs-core/scripts/package-cli.sh`, which stages the
   # names Cargo.toml's [package.metadata.package-cli] declares and checks
   # the tarball it built; then one `attach` job, the only one there with
   # write grants, attests both tarballs and attaches them. After `publish`,
@@ -227,7 +223,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@2dbd7ddc63456f7e2d9ad4ba7e77ed10c3258844 # v0.3.1
+    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@c471c826edc78866f572b873cbc165cb61b86ccf # v0.3.2
     with:
-      core-ref: v0.3.1
+      core-ref: v0.3.2
       toolchain: 1.95.0
