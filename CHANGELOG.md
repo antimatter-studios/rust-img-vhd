@@ -7,6 +7,14 @@ never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A cold cache no longer fails a test tier on its line count.** The
+  `test (release)` and `qemu-validation` jobs build their tests in a step
+  before the budgeted one, so cargo's `Downloaded` and `Compiling` lines stay
+  out of the budget. `tests/ci_profile.rs` refuses a budgeted `cargo test`
+  that no earlier step builds (#143).
+
 ### Changed
 
 - **The family's scripts run in place from rust-fs-core, and this repository

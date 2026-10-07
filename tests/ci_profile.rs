@@ -5408,6 +5408,11 @@ fn gating_jobs(workflow: &str) -> Vec<Job> {
 /// `cargo test` added beside the wrapped ones inherits none of that and
 /// nothing else would notice: it passes, it is loud, and loud is not a
 /// failure anybody is paged for.
+///
+/// `cargo test --no-run` is the exception: it executes no test, so it has
+/// nothing to count. It is the build step that keeps a cold cache's
+/// compile out of the budget, and it is unbudgeted on purpose (see
+/// `every_budgeted_cargo_test_is_built_before_its_budget_starts`).
 #[test]
 fn every_cargo_test_the_gate_runs_is_under_an_output_budget() {
     let path = ci_yml();
@@ -5417,7 +5422,14 @@ fn every_cargo_test_the_gate_runs_is_under_an_output_budget() {
     let mut budgeted = 0usize;
     for job in gating_jobs(&workflow) {
         for words in job_commands(&job) {
-            if cargo_test_arguments(&words).is_none() {
+            let Some(arguments) = cargo_test_arguments(&words) else {
+                continue;
+            };
+            if arguments
+                .iter()
+                .take_while(|w| **w != "--")
+                .any(|w| *w == "--no-run")
+            {
                 continue;
             }
             if tier_invocation(&words).is_some() {
@@ -5773,4 +5785,200 @@ fn every_script_test_runs_by_glob_under_a_floor() {
         "the tests/scripts floor in ci.yml is {floor}, with {present} guards present: \
          it must be at least 1 and no more than the guards that exist"
     );
+}
+
+// ---------------------------------------------------------------------------
+// THE BUDGET COUNTS THE TESTS, NOT THE COMPILER.
+//
+// A tier's budget is measured on a warm run: the tests' own lines and the
+// verdict. When the job compiles inside the budgeted step, a cold cache adds
+// one `Downloaded` and one `Compiling` line per crate, and the tier fails on
+// a line count while every test passed. Nothing about the change under
+// review caused it: a new runner image changes the cache key, the cache
+// misses, and a failed job saves no cache, so every later run misses the
+// same way. Measured on rust-img-qcow2 run 37484826433: 462 lines against a budget
+// of 420, 124 of them cargo's.
+//
+// Raising the budget to absorb the compile makes it depend on the cache, so
+// it either fails cold or is loose warm. The fix is a build step before the
+// budgeted one, outside the budget, that builds exactly what the budgeted
+// run then executes; this guard keeps it there.
+
+/// The arguments a cargo command passes to cargo itself, normalised for
+/// comparison, when the command is `cargo build ...` or
+/// `cargo test --no-run ...`, and `None` otherwise.
+///
+/// Everything from `--` on is the test harness's and is dropped, and so are
+/// the flags that change only what cargo prints (`--quiet`, `-q`) or whether
+/// it runs (`--no-run`). The rest -- profile, targets, features, target
+/// triple, `--locked` -- decides which artefacts are built, and has to match
+/// exactly.
+fn cargo_build_arguments(words: &[String]) -> Option<BTreeSet<String>> {
+    if tier_invocation(words).is_some() {
+        return None;
+    }
+    let mut words = words
+        .iter()
+        .map(String::as_str)
+        .skip_while(|w| *w == "env" || (!w.starts_with('-') && w.contains('=')));
+    let program = words.next()?;
+    if program != "cargo" && !program.ends_with("/cargo") {
+        return None;
+    }
+    let mut rest = words.skip_while(|w| w.starts_with('+'));
+    let subcommand = rest.next()?;
+    let arguments: Vec<&str> = rest.take_while(|w| *w != "--").collect();
+    let builds = match subcommand {
+        "build" => true,
+        "test" => arguments.contains(&"--no-run"),
+        _ => false,
+    };
+    builds.then(|| normalised_cargo_arguments(&arguments))
+}
+
+/// The cargo arguments of a budgeted `cargo test`, normalised the same way
+/// as [`cargo_build_arguments`].
+fn budgeted_cargo_test_arguments(words: &[String]) -> Option<BTreeSet<String>> {
+    tier_invocation(words)?;
+    let arguments = cargo_test_arguments(words)?;
+    let cargo_side: Vec<&str> = arguments.into_iter().take_while(|w| *w != "--").collect();
+    // A budgeted `--no-run` executes nothing, so it has no tests to count
+    // and is a (budgeted) build, not a test run.
+    if cargo_side.contains(&"--no-run") {
+        return None;
+    }
+    Some(normalised_cargo_arguments(&cargo_side))
+}
+
+fn normalised_cargo_arguments(arguments: &[&str]) -> BTreeSet<String> {
+    arguments
+        .iter()
+        .filter(|w| !matches!(**w, "--no-run" | "--quiet" | "-q"))
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Every budgeted `cargo test` in a gating job of `workflow` that no
+/// EARLIER step of the same job builds, as `job: command`.
+fn budgeted_tests_compiled_inside_their_budget(workflow: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for job in gating_jobs(workflow) {
+        let mut built: Vec<BTreeSet<String>> = Vec::new();
+        for step in &job.steps {
+            let commands: Vec<Vec<String>> = command_lines(&step.run)
+                .iter()
+                .flat_map(|line| shell_commands(line))
+                .map(|(words, _)| words)
+                .collect();
+            for words in &commands {
+                if let Some(wanted) = budgeted_cargo_test_arguments(words) {
+                    if !built.contains(&wanted) {
+                        found.push(format!("{}: {}", job.name, words.join(" ")));
+                    }
+                }
+            }
+            // Only after the whole step: a build in the same step as the
+            // tier is still a build the step's own run pays for, and it
+            // is the separate step that lets the job log show the compile
+            // apart from the tests.
+            built.extend(commands.iter().filter_map(|w| cargo_build_arguments(w)));
+        }
+    }
+    found
+}
+
+/// Every budgeted `cargo test` in the gate is built by an earlier step of
+/// its own job, outside the budget, with the same cargo arguments.
+#[test]
+fn every_budgeted_cargo_test_is_built_before_its_budget_starts() {
+    let path = ci_yml();
+    let compiled_inside = budgeted_tests_compiled_inside_their_budget(&read_or_panic(&path));
+    assert!(
+        compiled_inside.is_empty(),
+        "{} runs a budgeted `cargo test` that no earlier step of its job \
+         builds, so a cold cache puts every `Downloaded` and `Compiling` line \
+         inside the tier's budget and fails it with every test passing:\n  {}\n\
+         Add a step before it that runs the same command with `--no-run` (or \
+         `cargo build` with the same arguments), outside \
+         `../rust-fs-core/scripts/tier.sh`.",
+        path.display(),
+        compiled_inside.join("\n  ")
+    );
+}
+
+/// The guard above can fail, and fails for each way the build step can be
+/// wrong: missing, after the tier, in another job, or building something
+/// else.
+#[test]
+fn a_build_step_that_does_not_build_the_budgeted_run_does_not_satisfy_this_guard() {
+    let tier = "bash ../rust-fs-core/scripts/tier.sh t release 10 100 -- \
+                cargo test --locked --release --all-targets";
+    let build = "cargo test --locked --release --all-targets --no-run";
+    let workflow = |steps: &str| {
+        format!("on: [pull_request]\njobs:\n  a:\n    steps:\n{steps}  b:\n    steps:\n      - run: {build}\n")
+    };
+    let step = |run: &str| format!("      - run: {run}\n");
+
+    let good = workflow(&format!("{}{}", step(build), step(tier)));
+    assert!(
+        budgeted_tests_compiled_inside_their_budget(&good).is_empty(),
+        "a matching build step before the tier was refused"
+    );
+    let good_build = workflow(&format!(
+        "{}{}",
+        step("cargo build --locked --release --all-targets"),
+        step(tier)
+    ));
+    assert!(
+        budgeted_tests_compiled_inside_their_budget(&good_build).is_empty(),
+        "a matching `cargo build` before the tier was refused"
+    );
+
+    for (what, steps) in [
+        ("no build step", step(tier)),
+        (
+            "the build after the tier",
+            format!("{}{}", step(tier), step(build)),
+        ),
+        (
+            "a build without --release",
+            format!(
+                "{}{}",
+                step("cargo test --locked --all-targets --no-run"),
+                step(tier)
+            ),
+        ),
+        (
+            "a build with other features",
+            format!(
+                "{}{}",
+                step("cargo test --locked --release --all-targets --features x --no-run"),
+                step(tier)
+            ),
+        ),
+        (
+            "a `cargo test` without --no-run, which is a run and not a build",
+            format!(
+                "{}{}",
+                step("cargo test --locked --release --all-targets"),
+                step(tier)
+            ),
+        ),
+        (
+            "a build that is itself inside a tier",
+            format!(
+                "{}{}",
+                step(&format!(
+                    "bash ../rust-fs-core/scripts/tier.sh b build 10 100 -- {build}"
+                )),
+                step(tier)
+            ),
+        ),
+    ] {
+        assert_eq!(
+            budgeted_tests_compiled_inside_their_budget(&workflow(&steps)).len(),
+            1,
+            "{what} satisfied the guard"
+        );
+    }
 }
