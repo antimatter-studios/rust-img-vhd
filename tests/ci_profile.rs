@@ -5408,6 +5408,11 @@ fn gating_jobs(workflow: &str) -> Vec<Job> {
 /// `cargo test` added beside the wrapped ones inherits none of that and
 /// nothing else would notice: it passes, it is loud, and loud is not a
 /// failure anybody is paged for.
+///
+/// `cargo test --no-run` is the exception: it executes no test, so it has
+/// nothing to count. It is the build step that keeps a cold cache's
+/// compile out of the budget, and it is unbudgeted on purpose (see
+/// `every_budgeted_cargo_test_is_built_before_its_budget_starts`).
 #[test]
 fn every_cargo_test_the_gate_runs_is_under_an_output_budget() {
     let path = ci_yml();
@@ -5417,7 +5422,14 @@ fn every_cargo_test_the_gate_runs_is_under_an_output_budget() {
     let mut budgeted = 0usize;
     for job in gating_jobs(&workflow) {
         for words in job_commands(&job) {
-            if cargo_test_arguments(&words).is_none() {
+            let Some(arguments) = cargo_test_arguments(&words) else {
+                continue;
+            };
+            if arguments
+                .iter()
+                .take_while(|w| **w != "--")
+                .any(|w| *w == "--no-run")
+            {
                 continue;
             }
             if tier_invocation(&words).is_some() {
