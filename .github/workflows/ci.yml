@@ -209,6 +209,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust-img-vhd
+      - name: build --release
+        # OUTSIDE THE BUDGET, so a cold cache's `Downloaded` and `Compiling`
+        # lines land here and not in the tier below (#143). `--no-run` builds
+        # exactly what the budgeted run executes, so that run compiles
+        # nothing. `every_budgeted_cargo_test_is_built_before_its_budget_starts`
+        # in tests/ci_profile.rs keeps this step here.
+        run: cargo test --locked --release --all-targets --features cli --no-run
       - name: test --release
         # ITS OWN TIER AND ITS OWN NUMBER, NOT THE MATRIX'S. It builds the
         # same targets today and counts roughly the same number, but it is a
@@ -274,6 +281,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust-img-vhd
+      - name: build the qemu cross-validation tests
+        # Outside the budget, so a cold cache's `Compiling` lines land here
+        # and not in the tier below (#143). The feature gate means this
+        # target is built nowhere else in the workflow.
+        run: cargo test --locked --features qemu-validation --test qemu_validation --no-run
       - name: qemu cross-validation tests
         # A FLOOR, AND ITS OWN, BECAUSE THIS RUN SELECTS BY NAME.
         # `--test qemu_validation` names one integration target, and

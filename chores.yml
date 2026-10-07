@@ -50,15 +50,15 @@ chore_min_version: 0.6.0
 #                                              separate build step, so no
 #                                              `Compiling` lines land here
 #     release    316 / 19,852    400 / 27,000  the same selection in the other
-#                                              profile. The job has no
-#                                              separate build step, so a cold
-#                                              cache puts ~70 `Compiling`
-#                                              lines in this tier too
-#     qemu        20 /  1,080    120 /  9,000  12 cross-validated images, plus
-#                                              the cold-cache compile of a
-#                                              target nothing else builds --
-#                                              the feature gate keeps it out
-#                                              of `--all-targets`
+#                                              profile. A build step before
+#                                              the tier (`--no-run`) keeps a
+#                                              cold cache's `Compiling` lines
+#                                              out of it (#143)
+#     qemu        20 /  1,080    120 /  9,000  12 cross-validated images. A
+#                                              build step before the tier
+#                                              compiles the target, which the
+#                                              feature gate keeps out of
+#                                              `--all-targets` (#143)
 #     cli         32 /  1,026     40 /  1,500  the installed tool: one line
 #                                              per test file and its verdict,
 #                                              and doctor's report. Paths are
@@ -236,6 +236,7 @@ tasks:
     # computation passes the debug run for the WRONG reason. See the note
     # on the `test-release` job in .github/workflows/ci.yml.
     cmds:
+      - 'cargo test --locked --release --all-targets --features cli --no-run'
       - 'bash ../rust-fs-core/scripts/tier.sh "test (release)" release 400 27000 -- cargo test --locked --release --all-targets --features cli'
       - 'bash ../rust-fs-core/scripts/test-floor.sh release 228'
 
@@ -248,6 +249,7 @@ tasks:
     # leaves this exiting 0 having cross-validated nothing -- and the
     # debug tier's own count would not move by one.
     cmds:
+      - 'cargo test --locked --features qemu-validation --test qemu_validation --no-run'
       - 'bash ../rust-fs-core/scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation'
       - 'bash ../rust-fs-core/scripts/test-floor.sh qemu 10'
 
