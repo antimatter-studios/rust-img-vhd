@@ -7,6 +7,13 @@ never does.
 
 ## [Unreleased]
 
+### Added
+
+- **`docs/features.md`, a features page kept current by every pull request.**
+  Each feature's state, the release it shipped in, its tracking issue and the
+  test that checks it. The README's status checklist is a short summary
+  pointing to it.
+
 ### Fixed
 
 - **A cold cache no longer fails a test tier on its line count.** The
