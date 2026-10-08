@@ -7,25 +7,16 @@ C/C++/Go/Swift.
 
 ## Status
 
-- [x] Fixed VHD (footer at end of file, plain pass-through to data)
-- [x] Dynamic VHD (footer + dynamic header + BAT + sparse blocks)
-- [x] Differencing VHD (parent VHD chain, fall-through reads)
-- [x] `BlockRead` + `BlockDevice` impl via `rust-fs-core`
-- [x] Reader is generic over `Arc<dyn BlockDevice>`; path-based `open` /
-  `open_rw` / `create_fixed` wrap a `FileDevice` internally, and the
-  `open_on_device` / `open_rw_on_device` constructors stack the VHD layer
-  on top of any caller-supplied device (e.g. an FSKit block resource).
-- [x] C ABI: `vhd_open` / `vhd_open_rw` / `vhd_create_fixed` /
-  `vhd_open_on_device` / `vhd_open_rw_on_device` — all returning
-  `*mut FsCoreDevice`.
-- [x] Write support — fixed VHDs (`open_rw`, `create_fixed`, pass-through
-  `write_at`)
-- [x] Dynamic write path (BAT mutation, tail-allocated blocks, footer
-  mirror rewrite). Crash-safety order on allocation:
-  data → bitmap → BAT entry → footer mirror, with `dev.flush()` between
-  each step.
-  - [ ] Differencing write path — still TODO. `write_at` on a
-    differencing reader returns `Error::ReadOnly`.
+Reads fixed, dynamic and differencing images, and recovers a damaged trailing
+footer from its mirror as the reference tool does. Writes fixed and dynamic
+images (BAT allocation, bitmaps and the footer mirror, flushed data, bitmap,
+BAT entry, footer in that order) and creates both kinds; a write to a
+differencing image is refused with `Error::ReadOnly`. The reader is generic
+over any `rust-fs-core` device, and the C ABI returns `FsCoreDevice` handles.
+Every shape is checked against `qemu-img`. **[docs/features.md](docs/features.md)
+is the full list**: every feature, its state (supported, partial, refused, not
+supported or upcoming), the release it shipped in, its tracking issue and the
+test that checks it. Every pull request that changes behaviour updates it.
 
 ## Command line
 
