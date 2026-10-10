@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue's run: main plus the queued pull requests, the run that
+  # decides whether they land. The queue reads ci-ok only from a workflow
+  # that triggers here.
+  merge_group:
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,8 +20,68 @@ permissions:
   contents: read
 
 jobs:
+  # Does this change need the full pipeline? rust-fs-core's
+  # scripts/code-changed.sh reads the change's paths and says false only when
+  # every one is documentation. The change is the pull request's diff, the
+  # merge queue group's (its base_sha to its head_sha: what the queue is about
+  # to land), or a push to main's (before to after); a tag or a push it cannot
+  # diff runs everything. The three-OS test matrix, the release suite and the
+  # qemu-img validation run only when the answer is true, and ci-ok accepts
+  # their skip when, and only when, it is false.
+  changes:
+    name: changes (does this need the full pipeline?)
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.c.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: rust-fs-core at the pinned tag, for code-changed.sh
+        uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          ref: v0.3.8
+          path: rust-fs-core
+      - name: Classify the change
+        id: c
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MQ_BASE: ${{ github.event.merge_group.base_sha }}
+          MQ_HEAD: ${{ github.event.merge_group.head_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          range=
+          case "$EVENT" in
+            pull_request) range="$PR_BASE...$PR_HEAD" ;;
+            merge_group) range="$MQ_BASE...$MQ_HEAD" ;;
+            push)
+              case "$REF" in
+                refs/heads/*)
+                  if [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ] &&
+                    git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+                    range="$PUSH_BEFORE...$PUSH_AFTER"
+                  fi ;;
+              esac ;;
+          esac
+          if [ -n "$range" ]; then
+            git diff --name-only "$range" | tee changed.txt
+            code="$(bash rust-fs-core/scripts/code-changed.sh < changed.txt)"
+          else
+            code=true
+          fi
+          echo "code=$code ($EVENT${range:+ $range})"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   test:
     name: test / ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -48,7 +112,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.7
+          ref: v0.3.8
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -175,6 +239,8 @@ jobs:
   # nothing else. See #85 and the comment on that step.
   test-release:
     name: test (release)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -201,7 +267,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.7
+          ref: v0.3.8
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -245,6 +311,8 @@ jobs:
 
   qemu-validation:
     name: qemu-validation
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -271,7 +339,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.7
+          ref: v0.3.8
           path: rust-fs-core
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -348,7 +416,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.7
+          ref: v0.3.8
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -445,7 +513,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.7
+          ref: v0.3.8
           path: rust-fs-core
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
@@ -529,7 +597,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.7
+          ref: v0.3.8
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -547,7 +615,7 @@ jobs:
 
   ci-ok:
     name: ci-ok
-    needs: [test, test-release, qemu-validation, fmt, cli, semver]
+    needs: [changes, test, test-release, qemu-validation, fmt, cli, semver]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -558,10 +626,14 @@ jobs:
       - name: every gating job must have concluded success
         env:
           NEEDS: ${{ toJSON(needs) }}
+          # false only for a change to documentation alone: then, and only
+          # then, a skipped job is not a failed one.
+          CODE: ${{ needs.changes.outputs.code }}
         run: |
           set -euo pipefail
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          bad="$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")')"
+          echo "code changed: $CODE"
+          bad="$(echo "$NEEDS" | jq -r --arg code "$CODE" '[to_entries[] | select(.value.result != "success" and ($code != "false" or .value.result != "skipped")) | .key] | join(", ")')"
           if [ -n "$bad" ]; then
               echo "::error::not 'success': $bad -- failure, cancellation and skipping all mean the gate did not run to completion"
               exit 1

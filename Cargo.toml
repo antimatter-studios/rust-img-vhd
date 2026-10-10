@@ -73,7 +73,7 @@ qemu-validation = []
 # 0.2.23 is the first release with scripts/package-cli.sh and the
 # release-cli workflow release.yml calls (#134): the tarball's packaging is
 # core's now, and the path sibling must carry it.
-rust-fs-core = { path = "../rust-fs-core", version = "0.3.7" }
+rust-fs-core = { path = "../rust-fs-core", version = "0.3.8" }
 # The command-line tool's argument parser, behind the `cli` feature (see the
 # `rust-img-vhd` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.
