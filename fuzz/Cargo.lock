@@ -83,7 +83,7 @@ checksum = "8ba29ee00fcf32311393b3a791a0a0b4802374f2ce1951f01487fa853755dc7f"
 
 [[package]]
 name = "rust-img-vhd"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "rust-fs-core",
 ]
