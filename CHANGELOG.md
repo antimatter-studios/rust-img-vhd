@@ -16,6 +16,13 @@ never does.
 
 ### Fixed
 
+- **A checkout builds without rust-fs-core beside it.** `rust-fs-core` is a
+  crates.io dependency again, at the version `Cargo.lock` records, in both
+  `Cargo.toml` and `fuzz/Cargo.toml`. Building from a checkout or a release
+  tag no longer fails with `failed to read ../rust-fs-core/Cargo.toml`. That
+  build is the only way to get the tool on Windows. A `standalone` CI job
+  builds the tool from a lone checkout on Linux and Windows. The README
+  describes the build and the Windows `default-host` setting (#148).
 - **A cold cache no longer fails a test tier on its line count.** The
   `test (release)` and `qemu-validation` jobs build their tests in a step
   before the budgeted one, so cargo's `Downloaded` and `Compiling` lines stay

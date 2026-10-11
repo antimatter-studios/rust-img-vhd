@@ -21,9 +21,10 @@ chore_min_version: 0.6.0
 #
 # WHY fs_core.h IS COPIED TOO. include/img_vhd.h opens with
 # `#include "fs_core.h"` — this crate's C ABI hands out FsCoreDevice handles —
-# so a consumer given only img_vhd.h cannot compile. The path below is the same
-# one Cargo.toml resolves rust-fs-core from, and NOTHING CHECKS THAT THE TWO
-# AGREE.
+# so a consumer given only img_vhd.h cannot compile. The header comes from the
+# ../rust-fs-core checkout, while Cargo.toml takes rust-fs-core from crates.io
+# (#148). Keep that checkout at the version Cargo.lock resolves. NOTHING CHECKS
+# THAT THE TWO AGREE.
 # QUIET BY DEFAULT, --verbose ON REQUEST, AND THE BUDGET IS A NUMBER.
 #
 #   A test task prints a VERDICT: one line per tier, a final count, and the
@@ -121,6 +122,8 @@ tasks:
       - 'include/*.h'
       # fs_core.h is a source of ours because we ship it (see the cp below).
       # THIS PATH AND THE cp MUST AGREE, and nothing checks that they do.
+      # The checkout it is read from must be at the version Cargo.lock
+      # resolves rust-fs-core to, which is crates.io's (#148).
       - '../rust-fs-core/include/fs_core.h'
       # THE GUARD IS PART OF THIS TASK, SO IT IS PART OF THE FINGERPRINT.
       #
