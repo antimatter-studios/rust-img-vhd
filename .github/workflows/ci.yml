@@ -563,6 +563,34 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # A CHECKOUT BUILDS ON ITS OWN (#148). Every other job puts rust-fs-core
+  # beside this repository, for core's scripts; this one does not, and
+  # builds the tool the way someone with only this repository has to. On
+  # Windows, where no release tarball exists, that is the only way to get
+  # it. A dependency on the sibling fails here before it reaches a user.
+  standalone:
+    name: standalone (a checkout with no sibling builds, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout rust-img-vhd alone
+        uses: actions/checkout@v4
+        with:
+          path: alone/rust-img-vhd
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - name: nothing beside it
+        shell: bash
+        run: test ! -e alone/rust-fs-core
+      - name: the tool builds from the checkout, as `cargo install --path . --features cli` builds it
+        shell: bash
+        working-directory: alone/rust-img-vhd
+        run: cargo build --locked --release --features cli --bin rust-img-vhd
+
   # ONE CHECK GATES A MERGE, AND IT STANDS FOR EVERY JOB (#90).
   #
   # Branch protection names checks, and a check is a job name, so the
@@ -615,7 +643,7 @@ jobs:
 
   ci-ok:
     name: ci-ok
-    needs: [changes, test, test-release, qemu-validation, fmt, cli, semver]
+    needs: [changes, test, test-release, qemu-validation, fmt, cli, semver, standalone]
     if: always()
     runs-on: ubuntu-latest
     steps:
