@@ -72,8 +72,18 @@ qemu-validation = []
 #
 # 0.2.23 is the first release with scripts/package-cli.sh and the
 # release-cli workflow release.yml calls (#134): the tarball's packaging is
-# core's now, and the path sibling must carry it.
-rust-fs-core = { path = "../rust-fs-core", version = "0.3.8" }
+# core's now, and the ../rust-fs-core checkout the scripts run from must
+# carry it.
+#
+# THE PUBLISHED CRATE, NOT THE SIBLING (#148). A `path` here made every
+# build from a checkout -- a release tag included -- need a rust-fs-core
+# checkout beside it, and on Windows, where no release tarball exists, a
+# checkout is the only way to get the tool. The path also won over the
+# version, so which core a tag was built against was whatever the sibling
+# held. Cargo.lock now names the one this repository was tested with. To
+# build against an unreleased core, override it locally with
+# `[patch.crates-io]` in an uncommitted .cargo/config.toml; see AGENTS.md.
+rust-fs-core = { version = "0.3.8" }
 # The command-line tool's argument parser, behind the `cli` feature (see the
 # `rust-img-vhd` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.
