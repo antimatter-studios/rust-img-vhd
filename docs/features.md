@@ -55,3 +55,4 @@ States:
 | `img.vhd` `info`/`get`, `read`, `write`, `create` (`--features cli`) | Supported | 0.5.0 | | `cli_write.rs`, `tests/cli/test-info.sh`, `tests/cli/test-read.sh`, `tests/cli/test-write.sh`, `tests/cli/test-create.sh` |
 | `img.vhd` `resize`, `set`, and `write` on a differencing image | Not supported (`not implemented`, exit 3) | 0.5.0 | | `tests/cli/test-unsupported.sh`, `tests/cli/test-differencing.sh` |
 | `rust-img-vhd doctor`, man pages, shell completions | Supported | 0.5.0 | | `tests/cli/test-names.sh`, `tests/cli/test-docs.sh` |
+| Building the tool from a checkout or a release tag with no other repository beside it, on Linux and Windows | Supported | 0.6.1 (#148) | | the `standalone` CI job |
