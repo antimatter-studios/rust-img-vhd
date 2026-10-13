@@ -5,6 +5,9 @@ Notable changes to `rust-img-vhd` (published as `am-img-vhd` until its last vers
 never does.
 
 
+Changes not yet released are fragments in [`changelog.d/`](changelog.d/), one per
+pull request; a release gathers them into a section here.
+
 ## [Unreleased]
 
 ## [0.6.1] — 2026-10-11

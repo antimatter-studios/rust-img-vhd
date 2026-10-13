@@ -331,6 +331,7 @@ tasks:
     desc: Formatting and clippy, exactly as CI runs them
     cmds:
       - bash ../rust-fs-core/scripts/agents-core-check.sh
+      - bash ../rust-fs-core/scripts/changelog-check.sh
       - tests/scripts/test-no-consumer-names.sh
       - cargo fmt --check
       - cargo clippy --locked --all-targets --features cli -- -D warnings
