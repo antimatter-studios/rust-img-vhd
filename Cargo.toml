@@ -17,7 +17,7 @@ exclude = ["fuzz"]
 former-name = "am-img-vhd"
 
 [lib]
-# Published as `rust-img-vhd` on crates.io; consumers `use vhd::Reader`.
+# Published as `rust-img-vhd` on crates.io; consumers `use img_vhd::Reader`.
 name = "img_vhd"
 crate-type = ["staticlib", "rlib"]
 
