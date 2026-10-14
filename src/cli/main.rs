@@ -2,7 +2,7 @@
 //! binary.
 //!
 //! Installed as `rust-img-vhd` and linked as `img.vhd`. The dispatch and the
-//! output contract every tool shares are `fs_core::cli` (am-fs-core's `cli`
+//! output contract every tool shares are `fs_core::cli` (rust-fs-core's `cli`
 //! feature); `vhd` is the tool itself.
 
 mod vhd;

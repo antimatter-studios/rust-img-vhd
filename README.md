@@ -1,9 +1,11 @@
-# vhd
+# rust-img-vhd
 
 Pure-Rust reader for the Microsoft VHD (Virtual Hard Disk) format. Spec
 implemented from Microsoft's published whitepaper; no GPL code is
 copied or linked. Exposes a Rust API and a C ABI suitable for FFI from
 C/C++/Go/Swift.
+
+Published on crates.io as `rust-img-vhd`; the library name is `img_vhd`.
 
 ## Status
 
