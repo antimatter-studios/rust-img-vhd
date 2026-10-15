@@ -464,6 +464,12 @@ jobs:
         run: cargo doc --locked --no-deps
       - name: the one required check stands for every job
         working-directory: rust-img-vhd
+        # The full-only jobs carry the profile in their `if:`, so ci-gate
+        # reads them as conditional. They are declared here rather than
+        # dropped from ci-ok's needs: scripts/ci-verdict.sh accepts their skip
+        # only when the plan was quick or the change was documentation alone.
+        env:
+          CI_GATE_NON_GATING: test-release qemu-validation cli standalone
         run: bash ../rust-fs-core/scripts/ci-gate.sh
       - name: the agent guide carries the shared block
         working-directory: rust-img-vhd
