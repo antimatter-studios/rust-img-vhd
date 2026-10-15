@@ -1818,6 +1818,12 @@ const NON_GATING_KEYS: [&str; 2] = ["if", "continue-on-error"];
 /// skip only when the change was documentation alone, so on every change
 /// that could break it the job runs and gates; ci-gate refuses any other
 /// shape. Every other `if:` still marks the job as not gating.
+///
+/// The full-profile gate is accepted the same way: exactly
+/// `needs.changes.outputs.profile == 'full'`, alone or after the path
+/// gate. scripts/ci-plan.sh plans every event but `pull_request` as full,
+/// so the merge queue's run executes the job and ci-ok
+/// (scripts/ci-verdict.sh) refuses its skip on any full run.
 fn gating_keys_of(job: &Yaml) -> Vec<String> {
     let keys = keys_of(job);
     let needs_changes = match field(job, "needs") {
@@ -1827,9 +1833,14 @@ fn gating_keys_of(job: &Yaml) -> Vec<String> {
         },
         None => false,
     };
-    let path_gated = field(job, "if").and_then(Yaml::as_str)
-        == Some("needs.changes.outputs.code == 'true'")
-        && needs_changes
+    let path_gated = matches!(
+        field(job, "if").and_then(Yaml::as_str),
+        Some(
+            "needs.changes.outputs.code == 'true'"
+                | "needs.changes.outputs.profile == 'full'"
+                | "needs.changes.outputs.code == 'true' && needs.changes.outputs.profile == 'full'"
+        )
+    ) && needs_changes
         && !keys.iter().any(|k| k == "continue-on-error");
     keys.into_iter()
         .filter(|k| !(path_gated && k == "if"))

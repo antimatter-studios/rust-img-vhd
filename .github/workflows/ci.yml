@@ -8,6 +8,11 @@ on:
   # decides whether they land. The queue reads ci-ok only from a workflow
   # that triggers here.
   merge_group:
+  # A manual run of the full profile on any branch, for evidence a pull
+  # request's quick profile does not give. scripts/ci-plan.sh plans every
+  # event but pull_request as full.
+  workflow_dispatch:
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,12 +36,20 @@ jobs:
   changes:
     name: changes (does this need the full pipeline?)
     runs-on: ubuntu-latest
+    # quick or full, and the test matrix's runners, from scripts/ci-plan.sh.
     outputs:
       code: ${{ steps.c.outputs.code }}
+      profile: ${{ steps.plan.outputs.profile }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Plan the profile
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+        run: bash scripts/ci-plan.sh "$EVENT" | tee -a "$GITHUB_OUTPUT"
       - name: rust-fs-core at the pinned tag, for code-changed.sh
         uses: actions/checkout@v4
         with:
@@ -82,10 +95,13 @@ jobs:
     name: test / ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    # The quick profile runs this leg on ubuntu-latest alone; the full profile
+    # runs all three runners (scripts/ci-plan.sh). The job and its names are
+    # the same either way.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(needs.changes.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -240,7 +256,8 @@ jobs:
   test-release:
     name: test (release)
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # Full profile only; ci-ok accepts its skip on a quick run alone.
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.profile == 'full'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -312,7 +329,8 @@ jobs:
   qemu-validation:
     name: qemu-validation
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # Full profile only; ci-ok accepts its skip on a quick run alone.
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.profile == 'full'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -505,6 +523,10 @@ jobs:
   # same budget and floor, which tests/ci_profile.rs holds the two files to.
   cli:
     name: cli (the installed tool, on PATH)
+    needs: changes
+    # Full profile only; ci-ok accepts its skip on a quick run alone. Not
+    # path-gated: a full run builds the tool whatever the change touched.
+    if: needs.changes.outputs.profile == 'full'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -575,6 +597,10 @@ jobs:
   # it. A dependency on the sibling fails here before it reaches a user.
   standalone:
     name: standalone (a checkout with no sibling builds, ${{ matrix.os }})
+    needs: changes
+    # Full profile only; ci-ok accepts its skip on a quick run alone. Not
+    # path-gated: a full run builds it whatever the change touched.
+    if: needs.changes.outputs.profile == 'full'
     strategy:
       fail-fast: false
       matrix:
@@ -652,23 +678,27 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       # EVERY job in `needs`, read from `needs` itself. This step once
       # echoed and looped over a hand-kept list that left out `semver`, so a
       # public-API break failed its own job and ci-ok still went green. A
-      # job added to `needs:` is now judged without editing this step.
+      # job added to `needs:` is now judged without editing this step, and
+      # the job list on the command line makes a job missing from `needs`
+      # a failure. scripts/ci-verdict.sh holds the rules;
+      # tests/scripts/test-ci-profile.sh is their truth table.
       - name: every gating job must have concluded success
         env:
           NEEDS: ${{ toJSON(needs) }}
           # false only for a change to documentation alone: then, and only
           # then, a skipped job is not a failed one.
           CODE: ${{ needs.changes.outputs.code }}
+          # quick only on a pull request: then, and only then, a skipped
+          # full-only job is not a failed one.
+          PROFILE: ${{ needs.changes.outputs.profile }}
+          FULL_ONLY: test-release qemu-validation cli standalone
         run: |
           set -euo pipefail
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          echo "code changed: $CODE"
-          bad="$(echo "$NEEDS" | jq -r --arg code "$CODE" '[to_entries[] | select(.value.result != "success" and ($code != "false" or .value.result != "skipped")) | .key] | join(", ")')"
-          if [ -n "$bad" ]; then
-              echo "::error::not 'success': $bad -- failure, cancellation and skipping all mean the gate did not run to completion"
-              exit 1
-          fi
-          echo "all gating jobs succeeded"
+          echo "code changed: $CODE, profile: $PROFILE"
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key) \(.value.result)"' |
+            bash scripts/ci-verdict.sh changes test test-release qemu-validation fmt cli semver standalone
