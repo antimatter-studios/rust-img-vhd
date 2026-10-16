@@ -83,7 +83,7 @@ qemu-validation = []
 # held. Cargo.lock now names the one this repository was tested with. To
 # build against an unreleased core, override it locally with
 # `[patch.crates-io]` in an uncommitted .cargo/config.toml; see AGENTS.md.
-rust-fs-core = { version = "0.3.11" }
+rust-fs-core = { version = "0.3.12" }
 # The command-line tool's argument parser, behind the `cli` feature (see the
 # `rust-img-vhd` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.
