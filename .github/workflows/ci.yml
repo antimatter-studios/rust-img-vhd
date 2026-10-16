@@ -54,7 +54,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.11
+          ref: v0.3.12
           path: rust-fs-core
       - name: Classify the change
         id: c
@@ -128,7 +128,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.11
+          ref: v0.3.12
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -284,7 +284,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.11
+          ref: v0.3.12
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -357,7 +357,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.11
+          ref: v0.3.12
           path: rust-fs-core
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -434,7 +434,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.11
+          ref: v0.3.12
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -546,7 +546,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.11
+          ref: v0.3.12
           path: rust-fs-core
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
@@ -662,7 +662,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.11
+          ref: v0.3.12
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
