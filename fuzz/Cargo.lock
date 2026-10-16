@@ -77,9 +77,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rust-fs-core"
-version = "0.3.11"
+version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b367b3bdf7ef90b9701edc9aa9cb9e67817e07c56a9ad88509367eebae74675"
+checksum = "2f1f036d73491e52424995be4598c47192bfc9d4bbd1baa690aef5a9694de1a5"
 
 [[package]]
 name = "rust-img-vhd"
