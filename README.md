@@ -18,7 +18,8 @@ over any `rust-fs-core` device, and the C ABI returns `FsCoreDevice` handles.
 Every shape is checked against `qemu-img`. **[docs/features.md](docs/features.md)
 is the full list**: every feature, its state (supported, partial, refused, not
 supported or upcoming), the release it shipped in, its tracking issue and the
-test that checks it. Every pull request that changes behaviour updates it.
+test that checks it. Every pull request that changes behaviour records its
+row in [features.d/](features.d/README.md), which a release writes into it.
 
 ## Command line
 
