@@ -1,14 +1,15 @@
 # Features
 
 What this crate does today, what it refuses, and what is coming. **Every
-pull request that adds, fixes, refuses or removes behaviour updates its row
-here, in the same pull request** (AGENTS.md). The reasoning behind each change
-is in [CHANGELOG.md](../CHANGELOG.md).
+pull request that adds, fixes, refuses or removes behaviour adds its row to
+[`features.d/`](../features.d/README.md), in the same pull request**
+(AGENTS.md), never an edit to this page; a release writes those rows here.
+The reasoning behind each change is in [CHANGELOG.md](../CHANGELOG.md).
 
 **Since** is the release a row's current state shipped in, with the issue or
 pull request the changelog cites for it. Work merged after the last release
-is **Unreleased (#N)** until the next one. **Tracking** names the issue for
-anything not finished.
+is **Unreleased (#N)** in its fragment until the next one. **Tracking**
+names the issue for anything not finished.
 
 States:
 
